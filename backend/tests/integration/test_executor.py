@@ -85,6 +85,27 @@ async def test_bad_syntax_raises_syntax_error(readonly_async_url: str) -> None:
     assert exc_info.value.kind == "syntax"
 
 
+async def test_array_agg_rows_are_json_serialisable(readonly_async_url: str) -> None:
+    engine = create_async_engine(readonly_async_url)
+    try:
+        result = await execute_readonly(
+            engine,
+            "SELECT array_agg(unit_price) AS prices, array_agg(order_date) AS dates "
+            "FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE o.id <= 3",
+            statement_timeout_ms=5000,
+            max_rows=10,
+        )
+    finally:
+        await engine.dispose()
+
+    json.dumps(result.rows)  # must not raise
+    prices, dates = result.rows[0]
+    assert isinstance(prices, list)
+    assert len(prices) > 0
+    assert all(isinstance(p, float) for p in prices)
+    assert all(isinstance(d, str) for d in dates)
+
+
 async def test_result_rows_are_json_serialisable(readonly_async_url: str) -> None:
     engine = create_async_engine(readonly_async_url)
     try:

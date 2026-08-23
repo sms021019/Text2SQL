@@ -85,14 +85,31 @@ async def execute_readonly(
     result set. The transaction is always rolled back -- this executor never
     commits.
 
+    Note: `conn.execute()` (via asyncpg's default cursor behaviour) buffers
+    the *entire* result set in memory before `fetchmany` ever runs, so
+    `max_rows` bounds the size of the payload returned here, not the
+    server-side work or network transfer done to produce it -- a query
+    matching a huge number of rows still costs the database and the wire
+    the same regardless of `max_rows`. This executor relies on `guard_sql`
+    having already injected a `LIMIT` into `sql` to bound that cost; do not
+    call it with ungoverned SQL.
+
     Raises:
         ExecutionError: If the database rejects the statement or the
             timeout fires; `kind` classifies the failure by SQLSTATE.
+        ValueError: If `statement_timeout_ms` is not an int (or int-like).
     """
+    try:
+        timeout_ms = int(statement_timeout_ms)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"statement_timeout_ms must be an int, got {statement_timeout_ms!r}"
+        ) from exc
+
     async with engine.connect() as conn:
         try:
             await conn.execute(text("SET TRANSACTION READ ONLY"))
-            await conn.execute(text(f"SET LOCAL statement_timeout = {int(statement_timeout_ms)}"))
+            await conn.execute(text(f"SET LOCAL statement_timeout = {timeout_ms}"))
 
             start = time.perf_counter()
             result = await conn.execute(text(sql))
@@ -134,10 +151,14 @@ def _pg_message(exc: DBAPIError) -> str:
 
 
 def _coerce(value: Any) -> Any:
-    """Coerce one cell into a JSON-serialisable value.
+    """Coerce one cell into a JSON-serialisable value, recursively.
 
-    Anything not covered here (str, int, float, bool, None, ...) already is
-    JSON-serialisable and passes through unchanged.
+    Postgres arrays (e.g. `array_agg(...)`) come back from asyncpg as
+    `list`, and `json`/`jsonb` columns as `list`/`dict` -- both may nest
+    non-JSON-safe leaves (a `NUMERIC[]` is a list of `Decimal`), so
+    containers are walked rather than passed through. Anything not covered
+    here (str, int, float, bool, None, ...) already is JSON-serialisable and
+    passes through unchanged.
     """
     if isinstance(value, Decimal):
         return float(value)
@@ -149,4 +170,8 @@ def _coerce(value: Any) -> Any:
         return base64.b64encode(bytes(value)).decode("ascii")
     if isinstance(value, timedelta):
         return str(value)
+    if isinstance(value, dict):
+        return {key: _coerce(v) for key, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_coerce(v) for v in value]
     return value
