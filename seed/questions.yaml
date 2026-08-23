@@ -1,0 +1,274 @@
+# NorthwindNext eval question set.
+#
+# Each entry: id, question, sql, expect_rows (row count of the SQL's result
+# set, verified by executing against the seeded `target` database), tags.
+#
+# expect_rows values below were filled in by running every `sql` statement
+# against a freshly-seeded container built from this repo's schema.sql +
+# generate.py (seed 42, anchor date 2026-08-01).
+
+- id: q01
+  question: How many customers do we have?
+  sql: SELECT count(*) FROM customers
+  expect_rows: 1
+  tags: [single-table, aggregate]
+
+- id: q02
+  question: List all product categories.
+  sql: SELECT id, name, parent_id FROM categories ORDER BY id
+  expect_rows: 20
+  tags: [single-table]
+
+- id: q03
+  question: Show all suppliers based in Germany.
+  sql: SELECT id, name, country FROM suppliers WHERE country = 'DE'
+  expect_rows: 4
+  tags: [single-table]
+
+- id: q04
+  question: What are the distinct order statuses?
+  sql: SELECT DISTINCT status FROM orders ORDER BY status
+  expect_rows: 5
+  tags: [single-table]
+
+- id: q05
+  question: How many products have been discontinued?
+  sql: SELECT count(*) FROM products WHERE discontinued_at IS NOT NULL
+  expect_rows: 1
+  tags: [single-table, aggregate]
+
+- id: q06
+  question: How many addresses are marked as a customer's default address?
+  sql: SELECT count(*) FROM addresses WHERE is_default = true
+  expect_rows: 1
+  tags: [single-table, aggregate]
+
+- id: q07
+  question: List every payment method we support.
+  sql: SELECT DISTINCT method FROM payments ORDER BY method
+  expect_rows: 4
+  tags: [single-table]
+
+- id: q08
+  question: How many reviews have a 5-star rating?
+  sql: SELECT count(*) FROM reviews WHERE rating = 5
+  expect_rows: 1
+  tags: [single-table, aggregate]
+
+
+- id: q09
+  question: List the products supplied by supplier 1, with their category name.
+  sql: |
+    SELECT p.id, p.name, c.name AS category_name
+    FROM products p
+    JOIN categories c ON c.id = p.category_id
+    WHERE p.supplier_id = 1
+  expect_rows: 13
+  tags: [join]
+
+- id: q10
+  question: For each order, show the customer's full name and country.
+  sql: |
+    SELECT o.id AS order_id, cu.first_name || ' ' || cu.last_name AS customer_name, cu.country
+    FROM orders o
+    JOIN customers cu ON cu.id = o.customer_id
+  expect_rows: 20000
+  tags: [join]
+
+- id: q11
+  question: List the shipping city for every shipped order.
+  sql: |
+    SELECT o.id AS order_id, a.city
+    FROM orders o
+    JOIN addresses a ON a.id = o.shipping_address_id
+    WHERE o.status = 'shipped'
+  expect_rows: 15373
+  tags: [join]
+
+- id: q12
+  question: Show each order item together with the product name it belongs to.
+  sql: |
+    SELECT oi.id, p.name AS product_name, oi.quantity, oi.unit_price
+    FROM order_items oi
+    JOIN products p ON p.id = oi.product_id
+    WHERE oi.order_id = 1
+  expect_rows: 1
+  tags: [join]
+
+- id: q13
+  question: Which carrier shipped order 5, if it was shipped?
+  sql: |
+    SELECT s.carrier, s.shipped_at, s.delivered_at
+    FROM shipments s
+    WHERE s.order_id = 5
+  expect_rows: 0
+  tags: [join]
+
+- id: q14
+  question: List every review together with the reviewing customer's segment.
+  sql: |
+    SELECT r.id, r.rating, cu.segment
+    FROM reviews r
+    JOIN customers cu ON cu.id = r.customer_id
+    WHERE r.product_id = 1
+  expect_rows: 16
+  tags: [join]
+
+- id: q15
+  question: Show subcategories together with their parent category name.
+  sql: |
+    SELECT c.id, c.name, parent.name AS parent_name
+    FROM categories c
+    JOIN categories parent ON parent.id = c.parent_id
+  expect_rows: 15
+  tags: [join]
+
+- id: q16
+  question: For each payment, show the order status it belongs to.
+  sql: |
+    SELECT p.id AS payment_id, p.amount, o.status
+    FROM payments p
+    JOIN orders o ON o.id = p.order_id
+    WHERE o.status = 'refunded'
+  expect_rows: 570
+  tags: [join]
+
+- id: q17
+  question: List products that currently have stock below their reorder level.
+  sql: |
+    SELECT p.id, p.name, i.quantity_on_hand, i.reorder_level
+    FROM products p
+    JOIN inventory i ON i.product_id = p.id
+    WHERE i.quantity_on_hand < i.reorder_level
+  expect_rows: 26
+  tags: [join]
+
+- id: q18
+  question: Show every address together with the customer's segment.
+  sql: |
+    SELECT a.id AS address_id, a.city, cu.segment
+    FROM addresses a
+    JOIN customers cu ON cu.id = a.customer_id
+    WHERE cu.id = 42
+  expect_rows: 1
+  tags: [join]
+
+- id: q19
+  question: What is the total revenue (using order_items, not the product catalog price)?
+  sql: SELECT round(sum(oi.unit_price * oi.quantity), 2) AS revenue FROM order_items oi
+  expect_rows: 1
+  tags: [aggregate, revenue]
+
+- id: q20
+  question: What is the total revenue per order status, using order_items unit_price?
+  sql: |
+    SELECT o.status, round(sum(oi.unit_price * oi.quantity), 2) AS revenue
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.id
+    GROUP BY o.status
+    ORDER BY o.status
+  expect_rows: 5
+  tags: [aggregate, join, revenue]
+
+- id: q21
+  question: What are the top 5 products by revenue?
+  sql: |
+    SELECT p.id, p.name, round(sum(oi.unit_price * oi.quantity), 2) AS revenue
+    FROM order_items oi
+    JOIN products p ON p.id = oi.product_id
+    GROUP BY p.id, p.name
+    ORDER BY revenue DESC
+    LIMIT 5
+  expect_rows: 5
+  tags: [aggregate, join, top-n, revenue]
+
+- id: q22
+  question: What are the top 10 customers by number of orders placed?
+  sql: |
+    SELECT customer_id, count(*) AS order_count
+    FROM orders
+    GROUP BY customer_id
+    ORDER BY order_count DESC, customer_id
+    LIMIT 10
+  expect_rows: 10
+  tags: [aggregate, top-n]
+
+- id: q23
+  question: What is the average rating per product, for products with at least 20 reviews?
+  sql: |
+    SELECT product_id, round(avg(rating), 2) AS avg_rating, count(*) AS review_count
+    FROM reviews
+    GROUP BY product_id
+    HAVING count(*) >= 20
+    ORDER BY avg_rating DESC
+  expect_rows: 96
+  tags: [aggregate]
+
+- id: q24
+  question: How many orders are there for each status?
+  sql: SELECT status, count(*) AS n FROM orders GROUP BY status ORDER BY status
+  expect_rows: 5
+  tags: [aggregate]
+
+- id: q25
+  question: What is the average order revenue, computed from order_items rather than the product catalog?
+  sql: |
+    SELECT round(avg(order_total), 2) AS avg_order_revenue
+    FROM (
+      SELECT order_id, sum(unit_price * quantity) AS order_total
+      FROM order_items
+      GROUP BY order_id
+    ) totals
+  expect_rows: 1
+  tags: [aggregate, revenue]
+
+- id: q26
+  question: Which 5 suppliers have the most products discontinued?
+  sql: |
+    SELECT supplier_id, count(*) AS discontinued_count
+    FROM products
+    WHERE discontinued_at IS NOT NULL
+    GROUP BY supplier_id
+    ORDER BY discontinued_count DESC, supplier_id
+    LIMIT 5
+  expect_rows: 5
+  tags: [aggregate, top-n]
+
+- id: q27
+  question: How many orders were placed in July 2026?
+  sql: |
+    SELECT count(*) FROM orders
+    WHERE order_date >= '2026-07-01' AND order_date < '2026-08-01'
+  expect_rows: 1
+  tags: [date-range, aggregate]
+
+- id: q28
+  question: What was the total revenue (order_items) for orders placed in the second half of 2025?
+  sql: |
+    SELECT round(sum(oi.unit_price * oi.quantity), 2) AS revenue
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.id
+    WHERE o.order_date >= '2025-07-01' AND o.order_date < '2026-01-01'
+  expect_rows: 1
+  tags: [date-range, join, revenue]
+
+- id: q29
+  question: List orders placed in the last 7 days before the data cutoff (2026-08-01).
+  sql: |
+    SELECT id, customer_id, status, order_date
+    FROM orders
+    WHERE order_date >= '2026-07-25' AND order_date < '2026-08-01'
+    ORDER BY order_date
+  expect_rows: 163
+  tags: [date-range]
+
+- id: q30
+  question: How many customers signed up in each of the last 3 months before the data cutoff?
+  sql: |
+    SELECT date_trunc('month', signup_date)::date AS month, count(*) AS signups
+    FROM customers
+    WHERE signup_date >= '2026-05-01' AND signup_date < '2026-08-01'
+    GROUP BY 1
+    ORDER BY 1
+  expect_rows: 3
+  tags: [date-range, aggregate]
