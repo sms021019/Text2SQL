@@ -22,7 +22,13 @@ from app.db.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers` defaults to True, which would silently
+    # disable every logger already created by the time this runs -- for
+    # `upgrade_to_head()` called from `app.main`'s lifespan (Task 12), that's
+    # every module-level `logging.getLogger(__name__)` in the app plus
+    # uvicorn's own loggers, all instantiated at import time before the
+    # migration step. Keep them alive.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

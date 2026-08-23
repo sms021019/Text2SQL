@@ -63,9 +63,15 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        configure_logging(resolved_settings.log_level)
-
+        # Configured *after* the migration, not before: Alembic's env.py
+        # calls `logging.config.fileConfig(alembic.ini)`, which replaces the
+        # root logger's handlers with alembic.ini's plain-text ones -- an
+        # earlier `configure_logging()` call here would just get clobbered
+        # by that, silently reverting every log line for the rest of the
+        # process back out of JSON.
         await asyncio.to_thread(upgrade_to_head, resolved_settings.app_db_url)
+
+        configure_logging(resolved_settings.log_level)
 
         target_engine = make_engine(resolved_settings.target_db_url)
         app_engine = make_engine(resolved_settings.app_db_url)
@@ -74,9 +80,7 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -
         app_llm = llm or build_llm(resolved_settings)
 
         graph = await introspect(target_engine)
-        retriever = SchemaRetriever(
-            graph, app_llm, top_k=resolved_settings.retrieve_top_k
-        )
+        retriever = SchemaRetriever(graph, app_llm, top_k=resolved_settings.retrieve_top_k)
         await retriever.build_index()
 
         examples = _load_examples(resolved_settings.examples_path)

@@ -7,13 +7,17 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 import numpy as np
 from numpy.typing import NDArray
 
+from app.core.errors import LLMError
 from app.core.schema.models import SchemaGraph
 from app.llm.base import LLMClient
+
+logger = logging.getLogger(__name__)
 
 _KEYWORD_BOOST = 0.2
 _NOT_INDEXED = "build_index() has not been called"
@@ -44,13 +48,32 @@ class SchemaRetriever:
         self._hops = hops
         self._table_names: list[str] | None = None
         self._embeddings: NDArray[np.float64] | None = None
+        self._build_error: LLMError | None = None
+        self._build_attempted = False
 
     async def build_index(self) -> None:
+        """Embed every table's summary and cache the resulting matrix.
+
+        Tolerates the LLM being unreachable at startup (e.g. Ollama not yet
+        up in `docker compose`): the failure is stashed rather than raised,
+        so `create_app()`'s lifespan can finish and the app can serve
+        `/healthz`; a query made before the index is ever built successfully
+        then fails at the `retrieve` stage with the same `llm: ...` error a
+        mid-query LLM outage would produce, instead of the app never
+        starting at all.
+        """
+        self._build_attempted = True
         names = sorted(self._graph.tables)
         summaries = [self._graph.tables[name].summary() for name in names]
-        vectors = await self._llm.embed(summaries)
+        try:
+            vectors = await self._llm.embed(summaries)
+        except LLMError as exc:
+            logger.warning("schema index build failed, will retry lazily: %s", exc)
+            self._build_error = exc
+            return
         self._table_names = names
         self._embeddings = np.array(vectors, dtype=np.float64)
+        self._build_error = None
 
     async def scores(self, question: str) -> dict[str, float]:
         names, combined = await self._score_tables(question)
@@ -76,7 +99,14 @@ class SchemaRetriever:
 
     async def _score_tables(self, question: str) -> tuple[list[str], NDArray[np.float64]]:
         if self._table_names is None or self._embeddings is None:
-            raise RuntimeError(_NOT_INDEXED)
+            if not self._build_attempted:
+                raise RuntimeError(_NOT_INDEXED)
+            # An earlier build_index() attempt failed (LLM was unreachable) --
+            # retry now rather than staying broken for the process lifetime.
+            await self.build_index()
+            if self._table_names is None or self._embeddings is None:
+                assert self._build_error is not None
+                raise self._build_error
         [question_vec] = await self._llm.embed([question])
         q = np.array(question_vec, dtype=np.float64)
 

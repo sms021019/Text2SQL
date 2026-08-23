@@ -1,5 +1,6 @@
-.PHONY: up down logs test lint seed eval
+.PHONY: up up-ollama down logs test lint seed eval
 up:        ; docker compose up --build -d
+up-ollama: ; docker compose --profile ollama up --build -d
 down:      ; docker compose down -v
 logs:      ; docker compose logs -f backend
 test:      ; cd backend && uv run pytest -q
