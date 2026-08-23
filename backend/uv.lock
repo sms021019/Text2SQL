@@ -776,7 +776,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.8" },
     { name = "pydantic-settings", specifier = ">=2.4" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
-    { name = "sqlglot", specifier = ">=25" },
+    { name = "sqlglot", specifier = ">=30,<31" },
     { name = "structlog", specifier = ">=24" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]

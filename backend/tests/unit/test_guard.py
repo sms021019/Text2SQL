@@ -126,6 +126,89 @@ def test_union_with_delete_arm_is_rejected() -> None:
     assert excinfo.value.reason in {"parse", "not_select", "set_op_non_select"}
 
 
+# --------------------------------------------------------------------------
+# Forbidden-function families (exact names + prefix rules)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fn",
+    [
+        # dblink* — outbound connections
+        "dblink",
+        "dblink_exec",
+        "dblink_connect",
+        "dblink_connect_u",
+        "dblink_send_query",
+        "dblink_get_result",
+        "dblink_open",
+        "dblink_fetch",
+        # lo_* — large objects (read and write the filesystem)
+        "lo_import",
+        "lo_export",
+        "lo_creat",
+        "lo_put",
+        "lo_get",
+        "lo_unlink",
+        "lo_from_bytea",
+        # advisory locks — session-wide, outlive the statement
+        "pg_advisory_lock",
+        "pg_advisory_lock_shared",
+        "pg_advisory_xact_lock",
+        "pg_advisory_unlock",
+        "pg_try_advisory_lock",
+        "pg_try_advisory_xact_lock",
+        # sequence mutation — writes wearing a read's clothes
+        "nextval",
+        "setval",
+        "currval",
+        "lastval",
+        # filesystem / directory
+        "pg_read_file",
+        "pg_read_binary_file",
+        "pg_ls_dir",
+        "pg_ls_waldir",
+        "pg_stat_file",
+        "pg_file_write",
+        "pg_file_unlink",
+        "pg_logdir_ls",
+        # backend and cluster state
+        "pg_terminate_backend",
+        "pg_cancel_backend",
+        "pg_stat_reset",
+        "pg_stat_reset_shared",
+        "pg_reload_conf",
+        "pg_rotate_logfile",
+        "pg_backend_pid",
+        # sleeps / timing oracles
+        "pg_sleep",
+        "pg_sleep_for",
+        "pg_sleep_until",
+        # session state and exfiltration
+        "set_config",
+        "current_setting",
+        "query_to_xml",
+    ],
+)
+def test_forbidden_function_families(fn: str) -> None:
+    with pytest.raises(GuardError) as excinfo:
+        guard(f"SELECT {fn}(1)")
+    assert excinfo.value.reason == "forbidden_function"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # The prefix rules must not degrade into blanket `pg_` blocking: these
+        # are ordinary read-only introspection helpers.
+        "SELECT pg_typeof(1) FROM orders",
+        "SELECT pg_column_size(id) FROM orders",
+    ],
+)
+def test_benign_pg_functions_are_not_over_blocked(sql: str) -> None:
+    assert guard(sql).endswith("LIMIT 500")
+
+
 def test_write_in_a_cte_nested_inside_a_subquery_is_rejected() -> None:
     """The CTE scan walks the whole tree, not just the root WITH clause."""
     with pytest.raises(GuardError) as excinfo:
@@ -137,6 +220,76 @@ def test_lock_on_a_union_arm_is_rejected() -> None:
     with pytest.raises(GuardError) as excinfo:
         guard("SELECT id FROM orders UNION SELECT id FROM customers FOR UPDATE")
     assert excinfo.value.reason == "lock"
+
+
+# --------------------------------------------------------------------------
+# CTE alias scoping
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # A CTE declared inside a subquery must not exempt a same-named real
+        # table in an enclosing/sibling scope. Collecting aliases tree-wide
+        # would accept all three of these.
+        "SELECT * FROM secrets, (WITH secrets AS (SELECT 1 AS a) SELECT * FROM secrets) AS z",
+        (
+            "SELECT (SELECT count(*) FROM secrets) "
+            "FROM (WITH secrets AS (SELECT 1 AS a) SELECT * FROM secrets) AS z"
+        ),
+        (
+            "SELECT id FROM (WITH secrets AS (SELECT 1 AS id) SELECT * FROM secrets) AS z "
+            "UNION SELECT id FROM secrets"
+        ),
+    ],
+)
+def test_cte_alias_does_not_leak_out_of_its_scope(sql: str) -> None:
+    with pytest.raises(GuardError) as excinfo:
+        guard(sql)
+    assert excinfo.value.reason == "unknown_table"
+
+
+def test_cte_alias_is_visible_inside_its_own_subquery_scope() -> None:
+    """The flip side: within the scope that declares it, the alias resolves."""
+    out = guard("SELECT * FROM (WITH t AS (SELECT 1 AS a) SELECT * FROM t) AS z")
+    assert out.endswith("LIMIT 500")
+
+
+def test_sibling_cte_is_visible_within_the_same_with_clause() -> None:
+    out = guard("WITH a AS (SELECT * FROM orders), b AS (SELECT * FROM a) SELECT * FROM b")
+    assert out.endswith("LIMIT 500")
+
+
+def test_recursive_cte_self_reference_is_allowed() -> None:
+    out = guard(
+        "WITH RECURSIVE t AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM t WHERE n < 5) "
+        "SELECT * FROM t"
+    )
+    assert out.endswith("LIMIT 500")
+
+
+# --------------------------------------------------------------------------
+# Misc
+# --------------------------------------------------------------------------
+
+
+def test_parenthesised_statement_is_unwrapped_and_limited() -> None:
+    assert guard("(SELECT * FROM orders)") == "SELECT * FROM orders LIMIT 500"
+    assert guard("((SELECT * FROM orders))") == "SELECT * FROM orders LIMIT 500"
+
+
+def test_alter_is_rejected() -> None:
+    with pytest.raises(GuardError) as excinfo:
+        guard("ALTER TABLE orders ADD COLUMN x int")
+    assert excinfo.value.reason == "not_select"
+
+
+def test_set_op_non_select_is_reachable() -> None:
+    """`TABLE orders` parses to an Alias, not a query, as a UNION arm."""
+    with pytest.raises(GuardError) as excinfo:
+        guard("TABLE orders UNION SELECT 1")
+    assert excinfo.value.reason == "set_op_non_select"
 
 
 def test_empty_known_tables_rejects_everything_with_a_from() -> None:

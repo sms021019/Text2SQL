@@ -19,11 +19,16 @@ A statement is accepted only if all of the following hold:
   DML/DDL node appears anywhere in the tree;
 * there is no ``SELECT ... INTO`` and no row lock (``FOR UPDATE`` /
   ``FOR SHARE``);
-* no call to a function in :data:`FORBIDDEN_FUNCTIONS` (sleep / file / network
-  / session-state primitives), matched case-insensitively and with any
-  ``pg_catalog.`` qualifier stripped;
-* every referenced table is either a CTE alias defined in the same statement
-  or a known table, unqualified or qualified with the ``public`` schema.
+* no call to a denied function -- either an exact name in
+  :data:`FORBIDDEN_FUNCTIONS` or a member of a family in
+  :data:`FORBIDDEN_FUNCTION_PREFIXES`. Between them these cover sleeps and
+  timing oracles, filesystem and directory access, large objects, outbound
+  connections (``dblink*``), advisory locks, sequence mutation
+  (``nextval``/``setval``), session and backend state, and statistics resets.
+  Matching is case-insensitive with any ``pg_catalog.`` qualifier stripped;
+* every referenced table is either a CTE alias *visible in that table's own
+  scope* or a known table, unqualified or qualified with the ``public``
+  schema.
 
 On acceptance the statement is normalised back to Postgres SQL with a row
 cap applied to the *outermost* query only: absent ``LIMIT`` gets `max_rows`
@@ -55,15 +60,22 @@ __all__ = ["FORBIDDEN_FUNCTIONS", "GuardError", "guard_sql"]
 
 DIALECT = "postgres"
 
-#: Postgres functions that let a read-only session sleep, touch the
-#: filesystem, open outbound connections, or mutate session/backend state.
+#: Exactly-matched forbidden function names. Kept as an explicit set even
+#: where :data:`FORBIDDEN_FUNCTION_PREFIXES` would already cover them, so the
+#: policy stays readable and a prefix edit cannot silently unblock a known-bad
+#: name. Sequence mutators (``nextval``/``setval``) are writes despite looking
+#: like reads; ``current_setting``/``set_config`` read and write session state.
 FORBIDDEN_FUNCTIONS: frozenset[str] = frozenset(
     {
+        "currval",
         "current_setting",
         "dblink",
         "dblink_exec",
+        "lastval",
         "lo_export",
         "lo_import",
+        "nextval",
+        "pg_backend_pid",
         "pg_cancel_backend",
         "pg_ls_dir",
         "pg_read_binary_file",
@@ -75,7 +87,33 @@ FORBIDDEN_FUNCTIONS: frozenset[str] = frozenset(
         "pg_terminate_backend",
         "query_to_xml",
         "set_config",
+        "setval",
     }
+)
+
+#: Prefix rules covering whole families of dangerous builtins, so a variant we
+#: did not enumerate (``dblink_send_query``, ``pg_try_advisory_lock``,
+#: ``lo_put``, ...) is refused rather than waved through. Matched against the
+#: bare lowercased function name.
+#:
+#: These are deliberately narrow: a blanket ``pg_`` prefix would block ordinary
+#: introspection helpers, so benign calls such as ``pg_typeof(1)`` and
+#: ``pg_column_size(x)`` remain accepted.
+FORBIDDEN_FUNCTION_PREFIXES: tuple[str, ...] = (
+    "dblink",  # dblink_connect, dblink_send_query, dblink_fetch, ...
+    "lo_",  # large objects: lo_creat, lo_put, lo_unlink, lo_get, ...
+    "pg_advisory",  # session-wide locks that outlive the statement
+    "pg_cancel",
+    "pg_file",  # pg_file_write, pg_file_rename, ...
+    "pg_logdir",
+    "pg_ls",
+    "pg_read",
+    "pg_reload",
+    "pg_rotate",
+    "pg_sleep",
+    "pg_stat_reset",
+    "pg_terminate",
+    "pg_try_advisory",
 )
 
 #: Node types that mutate data or schema. ``exp.DML``/``exp.DDL`` are
@@ -84,6 +122,7 @@ FORBIDDEN_FUNCTIONS: frozenset[str] = frozenset(
 #: on purpose: the mixins are not ``Expression`` subclasses, so a
 #: ``tuple[type[exp.Expression], ...]`` annotation would not type-check.
 _WRITE_NODES = (
+    exp.Alter,
     exp.DDL,
     exp.DML,
     exp.Drop,
@@ -157,6 +196,11 @@ def _parse_single(sql: str) -> exp.Query:
         )
 
     expr = statements[0]
+    # A fully-parenthesised statement, `(SELECT ...)`, parses to a Subquery
+    # wrapper. Unwrap it (repeatedly, for `((SELECT ...))`) so it is judged --
+    # and limited -- as the query it is.
+    while isinstance(expr, exp.Subquery | exp.Paren) and isinstance(expr.this, exp.Expression):
+        expr = expr.this
     if isinstance(expr, exp.Command):
         # sqlglot's fallback for syntax it cannot model (EXPLAIN, VACUUM, ...).
         # It is opaque to the AST walk below, so it can never be cleared.
@@ -172,7 +216,14 @@ def _parse_single(sql: str) -> exp.Query:
 
 
 def _reject_non_select_set_op_arms(expr: exp.Query) -> None:
-    """Every arm of a set operation must itself be a query."""
+    """Every arm of a set operation must itself be a query.
+
+    Mostly defence in depth: sqlglot normalises `SELECT 1 UNION VALUES (1)`
+    into two Selects, so most non-query arms never reach here. `TABLE orders
+    UNION SELECT 1` does reach it (the `TABLE` arm parses to an Alias), and
+    the branch is kept regardless -- it is the check that stops a future
+    grammar change from quietly widening what counts as a set operation.
+    """
     for node in expr.find_all(exp.SetOperation):
         for side in ("this", "expression"):
             arm = node.args.get(side)
@@ -228,8 +279,13 @@ def _reject_into_and_locks(expr: exp.Query) -> None:
 def _reject_forbidden_functions(expr: exp.Query) -> None:
     for node in expr.find_all(exp.Func):
         for name in _function_names(node):
-            if name in FORBIDDEN_FUNCTIONS:
+            if _is_forbidden_function(name):
                 raise GuardError("forbidden_function", f"function {name}() is not allowed")
+
+
+def _is_forbidden_function(name: str) -> bool:
+    """True if `name` (bare, lowercased) is denied by name or by family."""
+    return name in FORBIDDEN_FUNCTIONS or name.startswith(FORBIDDEN_FUNCTION_PREFIXES)
 
 
 def _function_names(node: exp.Func) -> set[str]:
@@ -249,7 +305,6 @@ def _function_names(node: exp.Func) -> set[str]:
 
 def _reject_unknown_tables(expr: exp.Query, known_tables: set[str]) -> None:
     known = {name.lower() for name in known_tables}
-    cte_aliases = {cte.alias.lower() for cte in expr.find_all(exp.CTE) if cte.alias}
 
     for table in expr.find_all(exp.Table):
         name = table.name
@@ -257,7 +312,7 @@ def _reject_unknown_tables(expr: exp.Query, known_tables: set[str]) -> None:
             # Table-valued function (e.g. `FROM generate_series(1, 10) AS g`).
             # The callable itself is vetted by the forbidden-function pass.
             continue
-        if name.lower() in cte_aliases:
+        if name.lower() in _visible_cte_aliases(table):
             continue
 
         schema = (table.db or "").lower()
@@ -267,6 +322,36 @@ def _reject_unknown_tables(expr: exp.Query, known_tables: set[str]) -> None:
             raise GuardError("unknown_table", f"unknown table: {qualified}")
         if name.lower() not in known:
             raise GuardError("unknown_table", f"unknown table: {name}")
+
+
+def _visible_cte_aliases(table: exp.Table) -> set[str]:
+    """CTE aliases in scope *at this table*, resolved per scope.
+
+    Collecting CTE aliases tree-wide would be a hole: a CTE declared inside a
+    subquery would exempt a same-named real table in an unrelated scope, e.g.
+    ``SELECT * FROM secrets, (WITH secrets AS (...) SELECT * FROM secrets) z``
+    would wave through the outer `secrets`. So instead of one global set, walk
+    this table's ancestors and collect only the ``WITH`` clauses that actually
+    enclose it.
+
+    Within a CTE body every alias of the same ``WITH`` is treated as visible,
+    not just the ones declared earlier. That is marginally laxer than SQL's
+    real scoping rules for non-``RECURSIVE`` CTEs, but it is the simple way to
+    allow a ``WITH RECURSIVE`` self-reference, and the failure mode is benign:
+    the worst case is exempting a name the database itself would then reject.
+    """
+    visible: set[str] = set()
+    node: exp.Expr | None = table
+    while node is not None:
+        # A `With` reached by walking up means the table sits inside one of its
+        # CTE bodies; a `With` hanging off an ancestor query means the table
+        # sits in the body of the query those CTEs are declared for.
+        candidates = (node, node.args.get("with_"), node.args.get("with"))
+        for candidate in candidates:
+            if isinstance(candidate, exp.With):
+                visible |= {cte.alias.lower() for cte in candidate.expressions if cte.alias}
+        node = node.parent
+    return visible
 
 
 # ---------------------------------------------------------------------------
