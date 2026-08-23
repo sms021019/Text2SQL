@@ -85,3 +85,40 @@ def test_version_changes_when_column_added() -> None:
     g1 = _graph()
     g2 = _graph(extra_column=True)
     assert g1.version != g2.version
+
+
+def test_neighbors_excludes_self_on_self_referencing_fk() -> None:
+    categories = Table(
+        name="categories",
+        comment="Product categories; self-referencing hierarchy via parent_id.",
+        columns=[
+            Column(name="id", type="BIGINT", nullable=False, comment=None, is_pk=True),
+            Column(
+                name="parent_id",
+                type="BIGINT",
+                nullable=True,
+                comment="Parent category id, NULL for a top-level category.",
+                is_pk=False,
+            ),
+        ],
+        foreign_keys=[ForeignKey(column="parent_id", ref_table="categories", ref_column="id")],
+    )
+    graph = SchemaGraph.build(tables={"categories": categories})
+
+    assert "categories" not in graph.neighbors("categories")
+    assert graph.neighbors("categories") == set()
+
+
+def test_table_summary() -> None:
+    orders = _orders_table()
+    assert orders.summary() == ("orders: Customer orders. columns: id, customer_id, status")
+
+
+def test_table_summary_without_comment() -> None:
+    table = Table(
+        name="widgets",
+        comment=None,
+        columns=[Column(name="id", type="BIGINT", nullable=False, comment=None, is_pk=True)],
+        foreign_keys=[],
+    )
+    assert table.summary() == "widgets: columns: id"

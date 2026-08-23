@@ -56,9 +56,14 @@ class SchemaGraph(BaseModel):
         return cls(tables=tables, version=version)
 
     def neighbors(self, table: str) -> set[str]:
-        """Tables linked to `table` by a foreign key, in either direction."""
+        """Tables linked to `table` by a foreign key, in either direction.
+
+        Excludes `table` itself, so a self-referencing FK (e.g.
+        categories.parent_id -> categories.id) does not make a table its
+        own neighbor.
+        """
         this = self.tables[table]
-        out = {fk.ref_table for fk in this.foreign_keys}
+        out = {fk.ref_table for fk in this.foreign_keys if fk.ref_table != table}
         incoming = {
             name
             for name, other in self.tables.items()

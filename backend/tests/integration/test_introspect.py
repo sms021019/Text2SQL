@@ -40,6 +40,10 @@ async def test_introspect_builds_schema_graph(readonly_async_url: str) -> None:
     neighbors = graph.neighbors("orders")
     assert {"customers", "order_items", "payments", "shipments", "addresses"} <= neighbors
 
+    # categories.parent_id -> categories.id is self-referencing; a table is
+    # never its own neighbor even when it has a self-referencing FK.
+    assert "categories" not in graph.neighbors("categories")
+
     # version is a deterministic sha256 prefix
     assert len(graph.version) == 12
     assert graph.version == graph.version.lower()
