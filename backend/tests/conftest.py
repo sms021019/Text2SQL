@@ -27,6 +27,13 @@ def target_db_url(pg):  # sync psycopg url for seeding
         conn.execute("CREATE DATABASE app")
         conn.execute("CREATE ROLE app LOGIN PASSWORD 'app'")
         conn.execute("GRANT ALL PRIVILEGES ON DATABASE app TO app")
+    a = admin.rsplit("/", 1)[0] + "/app"
+    with psycopg.connect(a, autocommit=True) as conn:
+        # Postgres 15+ no longer grants CREATE on the public schema to
+        # everyone by default, so the database-level grant above isn't
+        # enough for `app` to create tables in its own `public` schema.
+        # Mirrors `seed/init.sh`, which does the same for the container.
+        conn.execute("GRANT ALL ON SCHEMA public TO app")
     # Replace only the trailing dbname segment; `.replace("/postgres", ...)`
     # would also clobber the "postgres" username baked into the URL.
     t = admin.rsplit("/", 1)[0] + "/target"
@@ -59,3 +66,10 @@ def target_db_url(pg):  # sync psycopg url for seeding
 def readonly_async_url(target_db_url):
     host_port = target_db_url.split("@")[1]
     return f"postgresql+asyncpg://readonly:readonly@{host_port}"
+
+
+@pytest.fixture(scope="session")
+def app_db_url(target_db_url):
+    # target_db_url ends in "/target"; app's database is named "app".
+    host_port = target_db_url.split("@")[1].rsplit("/", 1)[0]
+    return f"postgresql+asyncpg://app:app@{host_port}/app"
