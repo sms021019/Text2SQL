@@ -80,6 +80,86 @@ async def test_ollama_non_2xx_raises_llm_error():
         await client.complete("sys", "user")
 
 
+async def test_ollama_malformed_2xx_chat_body_raises_llm_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="m",
+        embed_model="e",
+        api_key="unused",
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(LLMError):
+        await client.complete("sys", "user")
+
+
+async def test_ollama_non_json_2xx_chat_body_raises_llm_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json")
+
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="m",
+        embed_model="e",
+        api_key="unused",
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(LLMError):
+        await client.complete("sys", "user")
+
+
+async def test_ollama_malformed_2xx_embed_body_raises_llm_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="m",
+        embed_model="e",
+        api_key="unused",
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(LLMError):
+        await client.embed(["x"])
+
+
+async def test_ollama_non_json_2xx_embed_body_raises_llm_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json")
+
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="m",
+        embed_model="e",
+        api_key="unused",
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(LLMError):
+        await client.embed(["x"])
+
+
+async def test_ollama_aclose_closes_underlying_httpx_client():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"message": {"content": "x"}})
+
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="m",
+        embed_model="e",
+        api_key="unused",
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    await client.aclose()
+    assert client._client.is_closed
+
+
 # --- OpenAICompatClient -------------------------------------------------------
 
 
@@ -188,6 +268,86 @@ async def test_openai_non_2xx_raises_llm_error():
     )
     with pytest.raises(LLMError):
         await client.embed(["x"])
+
+
+async def test_openai_malformed_2xx_chat_body_raises_llm_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com",
+        model="m",
+        embed_model="e",
+        api_key="k",
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(LLMError):
+        await client.complete("sys", "user")
+
+
+async def test_openai_non_json_2xx_chat_body_raises_llm_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json")
+
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com",
+        model="m",
+        embed_model="e",
+        api_key="k",
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(LLMError):
+        await client.complete("sys", "user")
+
+
+async def test_openai_malformed_2xx_embed_body_raises_llm_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com",
+        model="m",
+        embed_model="e",
+        api_key="k",
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(LLMError):
+        await client.embed(["x"])
+
+
+async def test_openai_non_json_2xx_embed_body_raises_llm_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json")
+
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com",
+        model="m",
+        embed_model="e",
+        api_key="k",
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(LLMError):
+        await client.embed(["x"])
+
+
+async def test_openai_aclose_closes_underlying_httpx_client():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"embedding": [0.1], "index": 0}]})
+
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com",
+        model="m",
+        embed_model="e",
+        api_key="k",
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    await client.aclose()
+    assert client._client.is_closed
 
 
 # --- build_llm ----------------------------------------------------------------

@@ -44,13 +44,16 @@ class OllamaClient:
         latency_ms = (time.perf_counter() - start) * 1000
         if resp.is_error:
             raise LLMError(f"ollama chat failed: {resp.status_code} {resp.text}")
-        data = resp.json()
-        text: str = data["message"]["content"]
-        usage = Usage(
-            prompt_tokens=data.get("prompt_eval_count", 0),
-            completion_tokens=data.get("eval_count", 0),
-            latency_ms=latency_ms,
-        )
+        try:
+            data = resp.json()
+            text: str = data["message"]["content"]
+            usage = Usage(
+                prompt_tokens=data.get("prompt_eval_count", 0),
+                completion_tokens=data.get("eval_count", 0),
+                latency_ms=latency_ms,
+            )
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise LLMError(f"ollama chat returned an unexpected response shape: {exc}") from exc
         return Completion(text=text, usage=usage, model=self.model)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -63,6 +66,12 @@ class OllamaClient:
             raise LLMError(f"ollama embed request failed: {exc}") from exc
         if resp.is_error:
             raise LLMError(f"ollama embed failed: {resp.status_code} {resp.text}")
-        data = resp.json()
-        embeddings: list[list[float]] = data["embeddings"]
+        try:
+            data = resp.json()
+            embeddings: list[list[float]] = data["embeddings"]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise LLMError(f"ollama embed returned an unexpected response shape: {exc}") from exc
         return embeddings
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
