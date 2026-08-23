@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     prompt_version: str = "v1"
     cors_origins: list[str] = ["http://localhost:5173"]
 
+    log_level: str = "INFO"
+    #: Path to the few-shot examples YAML, relative to the CWD the app is
+    #: launched from (`backend/` locally; in the Docker image `seed/` is
+    #: copied to `/app/seed`, so this is overridden there). Missing file is
+    #: tolerated -- see `app.main._load_examples`.
+    examples_path: str = "../seed/questions.yaml"
+
 
 @lru_cache
 def get_settings() -> Settings:
