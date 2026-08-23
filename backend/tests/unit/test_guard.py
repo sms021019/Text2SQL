@@ -250,6 +250,29 @@ def test_cte_alias_does_not_leak_out_of_its_scope(sql: str) -> None:
     assert excinfo.value.reason == "unknown_table"
 
 
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # A qualified name can never bind to a CTE in Postgres -- it always
+        # means the real table -- so a CTE alias must not exempt it from the
+        # schema and known-table checks.
+        "WITH secrets AS (SELECT 1 AS a) SELECT * FROM public.secrets",
+        "WITH secrets AS (SELECT 1 AS a) SELECT * FROM other_schema.secrets",
+    ],
+)
+def test_cte_alias_does_not_exempt_a_qualified_name(sql: str) -> None:
+    with pytest.raises(GuardError) as excinfo:
+        guard(sql)
+    assert excinfo.value.reason == "unknown_table"
+
+
+def test_qualified_known_table_and_cte_alias_coexist() -> None:
+    """The unqualified alias still resolves; the qualified real table is
+    checked on its own merits and passes because `orders` is known."""
+    out = guard("WITH o AS (SELECT 1) SELECT * FROM public.orders, o")
+    assert out.endswith("LIMIT 500")
+
+
 def test_cte_alias_is_visible_inside_its_own_subquery_scope() -> None:
     """The flip side: within the scope that declares it, the alias resolves."""
     out = guard("SELECT * FROM (WITH t AS (SELECT 1 AS a) SELECT * FROM t) AS z")

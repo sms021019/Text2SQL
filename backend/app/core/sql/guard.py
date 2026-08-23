@@ -312,11 +312,14 @@ def _reject_unknown_tables(expr: exp.Query, known_tables: set[str]) -> None:
             # Table-valued function (e.g. `FROM generate_series(1, 10) AS g`).
             # The callable itself is vetted by the forbidden-function pass.
             continue
-        if name.lower() in _visible_cte_aliases(table):
-            continue
-
         schema = (table.db or "").lower()
         catalog = (table.catalog or "").lower()
+        if not schema and not catalog and name.lower() in _visible_cte_aliases(table):
+            # Only a bare name can bind to a CTE. A qualified name such as
+            # `public.secrets` always means the real table, so it must fall
+            # through to the schema and known-table checks below.
+            continue
+
         if catalog or (schema and schema != "public"):
             qualified = ".".join(part for part in (catalog, schema, name) if part)
             raise GuardError("unknown_table", f"unknown table: {qualified}")
@@ -333,6 +336,12 @@ def _visible_cte_aliases(table: exp.Table) -> set[str]:
     would wave through the outer `secrets`. So instead of one global set, walk
     this table's ancestors and collect only the ``WITH`` clauses that actually
     enclose it.
+
+    Callers must only consult this for an *unqualified* table name. In
+    Postgres a schema- or catalog-qualified name (``public.secrets``) always
+    resolves to the real table and can never bind to a CTE, so applying this
+    exemption to a qualified name would let ``WITH secrets AS (...) SELECT *
+    FROM public.secrets`` slip past the known-table check.
 
     Within a CTE body every alias of the same ``WITH`` is treated as visible,
     not just the ones declared earlier. That is marginally laxer than SQL's
