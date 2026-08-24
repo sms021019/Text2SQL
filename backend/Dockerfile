@@ -34,7 +34,7 @@ ENV PATH=/app/.venv/bin:$PATH \
 
 USER app
 EXPOSE 8000
-HEALTHCHECK --interval=10s --timeout=3s --start-period=30s \
+HEALTHCHECK --interval=10s --timeout=3s --start-period=90s \
     CMD curl -fsS http://localhost:8000/healthz || exit 1
 
 # --no-access-log: app/observability/middleware.py already logs an

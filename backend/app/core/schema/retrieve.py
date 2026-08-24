@@ -75,6 +75,20 @@ class SchemaRetriever:
         self._embeddings = np.array(vectors, dtype=np.float64)
         self._build_error = None
 
+    def mark_build_failed(self, reason: str) -> None:
+        """Record that the index build didn't complete, without `build_index()`
+        itself having raised -- for a caller that gave up waiting on it (e.g.
+        `app.main`'s lifespan enforcing a startup timeout via
+        `asyncio.wait_for`, where the awaited `build_index()` call is
+        cancelled rather than returning normally).
+
+        Leaves the retriever in exactly the state a caught `LLMError` inside
+        `build_index()` would: `_score_tables()` retries lazily on first use
+        and surfaces `reason` as an `LLMError` until a retry succeeds.
+        """
+        self._build_attempted = True
+        self._build_error = LLMError(reason)
+
     async def scores(self, question: str) -> dict[str, float]:
         names, combined = await self._score_tables(question)
         return dict(zip(names, (float(v) for v in combined), strict=True))

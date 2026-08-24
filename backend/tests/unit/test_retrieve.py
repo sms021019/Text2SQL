@@ -1,5 +1,6 @@
 import pytest
 
+from app.core.errors import LLMError
 from app.core.schema.models import Column, ForeignKey, SchemaGraph, Table
 from app.core.schema.retrieve import SchemaRetriever
 from tests.fakes.llm import FakeLLM
@@ -26,6 +27,25 @@ class VectorLLM(FakeLLM):
         if text in self._vectors:
             return self._vectors[text]
         return super()._embed_one(text)
+
+
+class FlakyLLM(VectorLLM):
+    """VectorLLM whose embed() raises `LLMError` for the first `fail_times`
+    calls, then embeds normally -- simulates the LLM being unreachable (e.g.
+    Ollama not up yet in `docker compose`) and later recovering (e.g. once
+    `ollama-pull` finishes).
+    """
+
+    def __init__(self, vectors: dict[str, list[float]], fail_times: int, dim: int = 4) -> None:
+        super().__init__(vectors, dim=dim)
+        self._remaining_failures = fail_times
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.embed_calls.append(list(texts))
+        if self._remaining_failures > 0:
+            self._remaining_failures -= 1
+            raise LLMError("ollama embed request failed: connection refused")
+        return [self._embed_one(text) for text in texts]
 
 
 def _customers() -> Table:
@@ -218,3 +238,74 @@ async def test_retrieve_zero_hops_does_not_expand_neighbours() -> None:
     result = await retriever.retrieve("how many orders")
 
     assert result == ["orders"]
+
+
+async def test_build_index_tolerates_llm_error_and_does_not_raise() -> None:
+    graph = _graph()
+    llm = FlakyLLM(_base_vectors(), fail_times=99)
+    retriever = SchemaRetriever(graph, llm)
+
+    await retriever.build_index()  # LLM unreachable -- must not raise
+
+    assert len(llm.embed_calls) == 1
+
+
+async def test_retrieve_raises_llm_error_while_down_then_succeeds_after_recovery() -> None:
+    graph = _graph()
+    vectors = _base_vectors()
+    vectors["how many orders"] = ORDERS_VEC
+    # Fails the initial build_index() call and the first lazy retry inside
+    # retrieve(), then recovers -- exercising both halves of the self-heal
+    # path in one retriever instance.
+    llm = FlakyLLM(vectors, fail_times=2)
+    retriever = SchemaRetriever(graph, llm, top_k=1, hops=0)
+
+    await retriever.build_index()  # LLM down: tolerated, does not raise
+
+    with pytest.raises(LLMError):
+        await retriever.retrieve("how many orders")  # still down: lazy retry also fails
+
+    result = await retriever.retrieve("how many orders")  # LLM recovered: lazy retry succeeds
+    assert result == ["orders"]
+
+
+async def test_scores_also_raises_llm_error_while_down() -> None:
+    graph = _graph()
+    llm = FlakyLLM(_base_vectors(), fail_times=99)
+    retriever = SchemaRetriever(graph, llm)
+
+    await retriever.build_index()
+
+    with pytest.raises(LLMError):
+        await retriever.scores("how many orders")
+
+
+async def test_mark_build_failed_then_retrieve_self_heals_once_llm_recovers() -> None:
+    """`mark_build_failed()` (used by `app.main`'s lifespan when a startup
+    `asyncio.wait_for(retriever.build_index(), timeout=...)` times out) must
+    put the retriever in exactly the state a caught `LLMError` inside
+    `build_index()` itself would: `_score_tables()` retries lazily on the
+    next call.
+    """
+    graph = _graph()
+    vectors = _base_vectors()
+    vectors["how many orders"] = ORDERS_VEC
+    llm = VectorLLM(vectors)
+    retriever = SchemaRetriever(graph, llm, top_k=1, hops=0)
+
+    retriever.mark_build_failed("embedding timed out during startup after 20.0s")
+    assert len(llm.embed_calls) == 0  # build_index() itself was never actually run
+
+    result = await retriever.retrieve("how many orders")  # lazy retry succeeds
+    assert result == ["orders"]
+
+
+async def test_mark_build_failed_surfaces_as_llm_error_while_still_down() -> None:
+    graph = _graph()
+    llm = FlakyLLM(_base_vectors(), fail_times=99)
+    retriever = SchemaRetriever(graph, llm)
+
+    retriever.mark_build_failed("embedding timed out during startup after 20.0s")
+
+    with pytest.raises(LLMError):
+        await retriever.retrieve("how many orders")

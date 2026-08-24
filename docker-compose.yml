@@ -35,12 +35,20 @@ services:
       - ollama:/root/.ollama
     ports:
       - "11434:11434"
+    healthcheck:
+      # No curl in the ollama image -- `ollama list` talks to the local
+      # server over its own client instead.
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   ollama-pull:
     image: ollama/ollama
     profiles: ["ollama"]
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
     entrypoint: ["/bin/sh", "-c"]
     command: >
       "OLLAMA_HOST=http://ollama:11434 ollama pull ${LLM_MODEL:-qwen2.5-coder:7b} &&

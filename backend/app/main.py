@@ -81,7 +81,19 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -
 
         graph = await introspect(target_engine)
         retriever = SchemaRetriever(graph, app_llm, top_k=resolved_settings.retrieve_top_k)
-        await retriever.build_index()
+        try:
+            await asyncio.wait_for(
+                retriever.build_index(), timeout=resolved_settings.startup_embed_timeout_s
+            )
+        except TimeoutError:
+            logger.warning(
+                "schema index build timed out after %ss, will retry lazily",
+                resolved_settings.startup_embed_timeout_s,
+            )
+            retriever.mark_build_failed(
+                f"embedding timed out during startup after "
+                f"{resolved_settings.startup_embed_timeout_s}s"
+            )
 
         examples = _load_examples(resolved_settings.examples_path)
         builder = PromptBuilder(resolved_settings.prompt_version, examples)

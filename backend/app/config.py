@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     llm_model: str = "qwen2.5-coder:7b"
     embed_model: str = "nomic-embed-text"
     llm_timeout_s: float = 60.0
+    #: Cap on how long `create_app()`'s lifespan will wait for the initial
+    #: `SchemaRetriever.build_index()` embedding call before giving up and
+    #: continuing startup anyway (see `app.main`'s lifespan) -- deliberately
+    #: shorter than `llm_timeout_s` so a slow-but-reachable LLM can't stall
+    #: startup past the Docker `HEALTHCHECK`'s `--start-period`.
+    startup_embed_timeout_s: float = 20.0
 
     retrieve_top_k: int = 4
     max_rows: int = 500
