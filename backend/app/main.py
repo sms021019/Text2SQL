@@ -22,17 +22,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.api.router import router
+from app.cache.redis import RedisCache
+from app.cache.schema_cache import SchemaCache
 from app.config import Settings, get_settings
 from app.core.pipeline import Text2SQLPipeline
 from app.core.prompting.builder import PromptBuilder
 from app.core.schema.introspect import introspect
-from app.core.schema.retrieve import SchemaRetriever
 from app.db.migrate import upgrade_to_head
 from app.db.session import make_engine
 from app.llm.base import LLMClient
 from app.llm.factory import build_llm
 from app.observability.logging import configure_logging
 from app.observability.middleware import RequestIDMiddleware
+from app.services.schema_service import prepare_retriever
 
 __all__ = ["app", "create_app"]
 
@@ -55,10 +57,16 @@ def _load_examples(path: str) -> list[dict[str, Any]]:
     return list(data)
 
 
-def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -> FastAPI:
-    """Build the FastAPI app. `settings`/`llm` are injectable so tests can
-    point at a container database and a `FakeLLM` instead of the real
-    services `get_settings()`/`build_llm()` would otherwise resolve."""
+def create_app(
+    settings: Settings | None = None,
+    llm: LLMClient | None = None,
+    redis: RedisCache | None = None,
+) -> FastAPI:
+    """Build the FastAPI app. `settings`/`llm`/`redis` are injectable so
+    tests can point at a container database, a `FakeLLM`, and a specific
+    `RedisCache` instead of the real services `get_settings()`/`build_llm()`
+    (and a `RedisCache` built from `settings.redis_url`) would otherwise
+    resolve."""
     resolved_settings = settings or get_settings()
 
     @asynccontextmanager
@@ -79,21 +87,15 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -
 
         app_llm = llm or build_llm(resolved_settings)
 
+        redis_cache = redis or RedisCache(
+            resolved_settings.redis_url, enabled=resolved_settings.cache_enabled
+        )
+        schema_cache = SchemaCache(redis_cache, ttl_s=resolved_settings.schema_cache_ttl_s)
+
         graph = await introspect(target_engine)
-        retriever = SchemaRetriever(graph, app_llm, top_k=resolved_settings.retrieve_top_k)
-        try:
-            await asyncio.wait_for(
-                retriever.build_index(), timeout=resolved_settings.startup_embed_timeout_s
-            )
-        except TimeoutError:
-            logger.warning(
-                "schema index build timed out after %ss, will retry lazily",
-                resolved_settings.startup_embed_timeout_s,
-            )
-            retriever.mark_build_failed(
-                f"embedding timed out during startup after "
-                f"{resolved_settings.startup_embed_timeout_s}s"
-            )
+        retriever, schema_index_source = await prepare_retriever(
+            graph, app_llm, resolved_settings, schema_cache
+        )
 
         examples = _load_examples(resolved_settings.examples_path)
         builder = PromptBuilder(resolved_settings.prompt_version, examples)
@@ -112,6 +114,9 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -
         app.state.app_engine = app_engine
         app.state.session_factory = session_factory
         app.state.llm = app_llm
+        app.state.redis = redis_cache
+        app.state.schema_cache = schema_cache
+        app.state.schema_index_source = schema_index_source
         app.state.graph = graph
         app.state.retriever = retriever
         app.state.builder = builder
@@ -124,6 +129,7 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -
             app.state.ready = False
             await target_engine.dispose()
             await app_engine.dispose()
+            await redis_cache.aclose()
             aclose = getattr(app_llm, "aclose", None)
             if aclose is not None:
                 await aclose()

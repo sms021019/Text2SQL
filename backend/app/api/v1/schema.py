@@ -5,9 +5,6 @@ index, and swap in a fresh `Text2SQLPipeline`).
 
 from __future__ import annotations
 
-import asyncio
-import logging
-
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
@@ -15,11 +12,9 @@ from app.api.deps import _require_ready, get_graph
 from app.core.pipeline import Text2SQLPipeline
 from app.core.schema.introspect import introspect
 from app.core.schema.models import SchemaGraph
-from app.core.schema.retrieve import SchemaRetriever
+from app.services.schema_service import prepare_retriever
 
 __all__ = ["router"]
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -78,20 +73,15 @@ async def get_schema(graph: SchemaGraph = Depends(get_graph)) -> SchemaResponse:
 async def refresh_schema(request: Request) -> RefreshResponse:
     state = request.app.state
 
+    # Invalidate first: a re-introspected graph with the same version (an
+    # unchanged schema) must still rebuild/re-store, not silently keep
+    # serving whatever was cached under that version.
+    await state.schema_cache.invalidate_all()
+
     graph = await introspect(state.target_engine)
-    retriever = SchemaRetriever(graph, state.llm, top_k=state.settings.retrieve_top_k)
-    try:
-        await asyncio.wait_for(
-            retriever.build_index(), timeout=state.settings.startup_embed_timeout_s
-        )
-    except TimeoutError:
-        logger.warning(
-            "schema index rebuild timed out after %ss, will retry lazily",
-            state.settings.startup_embed_timeout_s,
-        )
-        retriever.mark_build_failed(
-            f"embedding timed out during refresh after {state.settings.startup_embed_timeout_s}s"
-        )
+    retriever, schema_index_source = await prepare_retriever(
+        graph, state.llm, state.settings, state.schema_cache
+    )
     pipeline = Text2SQLPipeline(
         llm=state.llm,
         retriever=retriever,
@@ -106,5 +96,6 @@ async def refresh_schema(request: Request) -> RefreshResponse:
     state.graph = graph
     state.retriever = retriever
     state.pipeline = pipeline
+    state.schema_index_source = schema_index_source
 
     return RefreshResponse(version=graph.version)

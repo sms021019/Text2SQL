@@ -75,6 +75,39 @@ class SchemaRetriever:
         self._embeddings = np.array(vectors, dtype=np.float64)
         self._build_error = None
 
+    def export_index(self) -> tuple[list[str], NDArray[np.float64]] | None:
+        """Return the built `(table_names, embeddings)` pair, or `None` if
+        `build_index()`/`import_index()` has never completed successfully --
+        for a caller (e.g. `app.services.schema_service`) that wants to
+        persist the index without reaching into private state."""
+        if self._table_names is None or self._embeddings is None:
+            return None
+        return list(self._table_names), self._embeddings
+
+    def import_index(self, names: list[str], matrix: NDArray[np.float64]) -> None:
+        """Adopt a previously-`export_index()`ed `(names, matrix)` pair as
+        this retriever's built index, e.g. one just loaded from
+        `SchemaCache` -- skips the LLM `embed()` call `build_index()` would
+        otherwise make.
+
+        Raises `ValueError` if `names` and `matrix` disagree on row count, or
+        if `names` contains a table not present in this retriever's schema
+        graph (a stale/foreign cache entry). Otherwise marks the retriever
+        built and clears any prior `mark_build_failed()`/failed-`build_index()`
+        state, exactly as a successful `build_index()` would.
+        """
+        if len(names) != matrix.shape[0]:
+            raise ValueError(
+                f"import_index: {len(names)} names but matrix has {matrix.shape[0]} rows"
+            )
+        unknown = sorted(set(names) - set(self._graph.tables))
+        if unknown:
+            raise ValueError(f"import_index: unknown table names not in schema graph: {unknown}")
+        self._table_names = list(names)
+        self._embeddings = matrix
+        self._build_attempted = True
+        self._build_error = None
+
     def mark_build_failed(self, reason: str) -> None:
         """Record that the index build didn't complete, without `build_index()`
         itself having raised -- for a caller that gave up waiting on it (e.g.
