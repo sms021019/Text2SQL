@@ -88,6 +88,28 @@ describe("App", () => {
     );
   });
 
+  it("collapses and expands the schema sidebar", async () => {
+    vi.spyOn(api, "getSchema").mockResolvedValue(SCHEMA_RESPONSE);
+    const user = userEvent.setup();
+
+    render(<App />);
+    await waitFor(() => expect(api.getSchema).toHaveBeenCalled());
+
+    expect(screen.getByRole("heading", { name: "Schema" })).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /collapse schema sidebar/i }),
+    );
+    expect(
+      screen.queryByRole("heading", { name: "Schema" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /expand schema sidebar/i }),
+    );
+    expect(screen.getByRole("heading", { name: "Schema" })).toBeInTheDocument();
+  });
+
   it("shows the error banner when the request itself fails (ApiError)", async () => {
     vi.spyOn(api, "getSchema").mockResolvedValue(SCHEMA_RESPONSE);
     vi.spyOn(api, "askQuestion").mockRejectedValue(

@@ -44,19 +44,36 @@ function TableEntry({ table }: { table: SchemaTable }) {
 }
 
 export function SchemaSidebar({ schema, loading, error }: SchemaSidebarProps) {
+  const [collapsed, setCollapsed] = useState(false);
+
   return (
-    <aside className="schema-sidebar">
-      <h2>Schema</h2>
-      {loading && <p className="schema-status">Loading schema…</p>}
-      {error && <p className="schema-status schema-error">{error}</p>}
-      {schema && (
+    <aside className={`schema-sidebar ${collapsed ? "collapsed" : ""}`}>
+      <div className="schema-sidebar-header">
+        {!collapsed && <h2>Schema</h2>}
+        <button
+          type="button"
+          className="schema-collapse-toggle"
+          onClick={() => setCollapsed((c) => !c)}
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? "Expand schema sidebar" : "Collapse schema sidebar"}
+        >
+          {collapsed ? "«" : "»"}
+        </button>
+      </div>
+      {!collapsed && (
         <>
-          <p className="schema-version">version {schema.version}</p>
-          <ul className="schema-tables">
-            {schema.tables.map((table) => (
-              <TableEntry key={table.name} table={table} />
-            ))}
-          </ul>
+          {loading && <p className="schema-status">Loading schema…</p>}
+          {error && <p className="schema-status schema-error">{error}</p>}
+          {schema && (
+            <>
+              <p className="schema-version">version {schema.version}</p>
+              <ul className="schema-tables">
+                {schema.tables.map((table) => (
+                  <TableEntry key={table.name} table={table} />
+                ))}
+              </ul>
+            </>
+          )}
         </>
       )}
     </aside>
