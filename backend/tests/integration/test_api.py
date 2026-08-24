@@ -145,9 +145,7 @@ async def test_request_id_is_generated_when_absent(client: AsyncClient) -> None:
 
 
 @pytest.mark.parametrize("responses", [[GOOD_RESPONSE]])
-async def test_query_writes_a_query_log_row(
-    client: AsyncClient, app_db_url: str
-) -> None:
+async def test_query_writes_a_query_log_row(client: AsyncClient, app_db_url: str) -> None:
     resp = await client.post("/api/v1/query", json={"question": "How many orders are there?"})
     request_id = resp.json()["request_id"]
 
@@ -155,9 +153,7 @@ async def test_query_writes_a_query_log_row(
     try:
         async with AsyncSession(engine) as session:
             row = (
-                await session.execute(
-                    select(QueryLog).where(QueryLog.request_id == request_id)
-                )
+                await session.execute(select(QueryLog).where(QueryLog.request_id == request_id))
             ).scalar_one()
     finally:
         await engine.dispose()

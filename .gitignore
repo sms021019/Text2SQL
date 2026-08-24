@@ -11,3 +11,4 @@ dist/
 .coverage
 htmlcov/
 seed/data/
+eval-results.json
