@@ -19,6 +19,8 @@ from typing import Any
 import yaml
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import make_asgi_app
+from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.api.router import router
@@ -33,6 +35,12 @@ from app.db.session import make_engine
 from app.llm.base import LLMClient
 from app.llm.factory import build_llm
 from app.observability.logging import configure_logging
+from app.observability.metrics import (
+    CompositeObserver,
+    Metrics,
+    MetricsObserver,
+    set_schema_version,
+)
 from app.observability.middleware import RequestIDMiddleware
 from app.services.schema_service import build_pipeline, prepare_retriever
 
@@ -70,7 +78,30 @@ def create_app(
     from `settings.redis_url`, and a no-op `NullObserver`) would otherwise
     resolve."""
     resolved_settings = settings or get_settings()
-    resolved_observer: PipelineObserver = observer if observer is not None else NullObserver()
+
+    metrics = Metrics()
+    if resolved_settings.metrics_enabled:
+        metrics_observer = MetricsObserver(
+            metrics,
+            provider=resolved_settings.llm_provider,
+            prices=resolved_settings.llm_prices_usd_per_1k,
+        )
+        # `schema_observer` is deliberately *not* `resolved_observer` below:
+        # it only ever sees the one `on_cache(cache="schema", ...)` call
+        # `prepare_retriever` makes at startup/refresh, kept off of any
+        # caller-injected `observer` (e.g. a test's `RecordingObserver`) so
+        # that observer's event stream stays exactly what it was before this
+        # task -- one request's worth of pipeline events, nothing from
+        # startup. Metrics still see it, via `metrics_observer` directly.
+        schema_observer: PipelineObserver = metrics_observer
+        resolved_observer: PipelineObserver = (
+            CompositeObserver([observer, metrics_observer])
+            if observer is not None
+            else metrics_observer
+        )
+    else:
+        schema_observer = NullObserver()
+        resolved_observer = observer if observer is not None else NullObserver()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -97,8 +128,10 @@ def create_app(
 
         graph = await introspect(target_engine)
         retriever, schema_index_source = await prepare_retriever(
-            graph, app_llm, resolved_settings, schema_cache
+            graph, app_llm, resolved_settings, schema_cache, observer=schema_observer
         )
+        if resolved_settings.metrics_enabled:
+            set_schema_version(metrics, graph.version)
 
         examples = _load_examples(resolved_settings.examples_path)
         builder = PromptBuilder(resolved_settings.prompt_version, examples)
@@ -126,6 +159,8 @@ def create_app(
         app.state.retriever = retriever
         app.state.builder = builder
         app.state.observer = resolved_observer
+        app.state.metrics = metrics
+        app.state.schema_observer = schema_observer
         app.state.query_cache = query_cache
         app.state.pipeline = pipeline
         app.state.ready = True
@@ -155,6 +190,18 @@ def create_app(
     app.add_middleware(RequestIDMiddleware)
 
     app.include_router(router)
+
+    if resolved_settings.metrics_enabled:
+        # `.instrument(app)` only (no `.expose()`): we mount the ASGI app
+        # ourselves below, against `metrics.registry` rather than
+        # `prometheus_client`'s process-global default registry, so tests
+        # constructing multiple apps in the same process don't collide.
+        Instrumentator(
+            registry=metrics.registry,
+            excluded_handlers=["/metrics", "/healthz", "/readyz"],
+        ).instrument(app)
+        app.mount("/metrics", make_asgi_app(registry=metrics.registry))
+
     return app
 
 

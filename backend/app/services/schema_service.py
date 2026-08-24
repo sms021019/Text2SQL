@@ -26,7 +26,7 @@ from app.cache.query_cache import QueryCache
 from app.cache.redis import RedisCache
 from app.cache.schema_cache import SchemaCache
 from app.config import Settings
-from app.core.observer import PipelineObserver
+from app.core.observer import NullObserver, PipelineObserver
 from app.core.pipeline import Text2SQLPipeline
 from app.core.prompting.builder import PromptBuilder
 from app.core.schema.models import SchemaGraph
@@ -41,9 +41,18 @@ logger = logging.getLogger(__name__)
 #: `SchemaCache.load()` hit), `"embedded"` (built via the LLM this call), or
 #: `"failed"` (neither succeeded; the retriever self-heals lazily on first
 #: use, per `SchemaRetriever.mark_build_failed()`'s docstring). Recorded on
-#: `app.state.schema_index_source` for observability (Phase 2 Task 4 wires it
-#: into metrics/logs); not part of any HTTP response.
+#: `app.state.schema_index_source` for observability; also reported to
+#: `observer` as a `cache="schema"` event below (`"cache"` -> `"hit"`,
+#: `"embedded"`/`"failed"` -> `"miss"`) -- not part of any HTTP response.
 SchemaIndexSource = Literal["cache", "embedded", "failed"]
+
+#: `SchemaIndexSource` -> the `outcome` reported to
+#: `observer.on_cache(cache="schema", outcome=...)` below.
+_CACHE_OUTCOME: dict[SchemaIndexSource, str] = {
+    "cache": "hit",
+    "embedded": "miss",
+    "failed": "miss",
+}
 
 
 async def prepare_retriever(
@@ -51,6 +60,7 @@ async def prepare_retriever(
     llm: LLMClient,
     settings: Settings,
     schema_cache: SchemaCache,
+    observer: PipelineObserver | None = None,
 ) -> tuple[SchemaRetriever, SchemaIndexSource]:
     """Return a `SchemaRetriever` for `graph`, built either from a cached
     index (`SchemaCache.load(graph.version)`, no LLM call) or, on a miss, by
@@ -60,7 +70,15 @@ async def prepare_retriever(
     via `mark_build_failed()` rather than raising. A freshly built index is
     stored back into `schema_cache` for next time; a cache hit is not
     re-stored.
+
+    `observer` (defaulting to a no-op `NullObserver`) gets exactly one
+    `on_cache(cache="schema", outcome=...)` call per invocation, mapped from
+    the returned `SchemaIndexSource` -- see `_CACHE_OUTCOME`. Callers pass a
+    dedicated metrics-only observer here (`app.main`'s `schema_observer`),
+    not the per-request pipeline observer a test might inject, since this
+    runs once at startup/refresh rather than per query.
     """
+    resolved_observer: PipelineObserver = observer if observer is not None else NullObserver()
     retriever = SchemaRetriever(graph, llm, top_k=settings.retrieve_top_k)
 
     cached = await schema_cache.load(graph.version)
@@ -76,6 +94,7 @@ async def prepare_retriever(
             logger.warning("schema cache entry invalid, rebuilding: %s", exc)
         else:
             logger.info("schema_cache_hit version=%s", graph.version)
+            resolved_observer.on_cache(cache="schema", outcome=_CACHE_OUTCOME["cache"])
             return retriever, "cache"
 
     try:
@@ -91,11 +110,13 @@ async def prepare_retriever(
 
     exported = retriever.export_index()
     if exported is None:
+        resolved_observer.on_cache(cache="schema", outcome=_CACHE_OUTCOME["failed"])
         return retriever, "failed"
 
     names, matrix = exported
     await schema_cache.store(graph, names, matrix)
     logger.info("schema_cache_store version=%s", graph.version)
+    resolved_observer.on_cache(cache="schema", outcome=_CACHE_OUTCOME["embedded"])
     return retriever, "embedded"
 
 

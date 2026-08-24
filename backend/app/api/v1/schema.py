@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from app.api.deps import _require_ready, get_graph
 from app.core.schema.introspect import introspect
 from app.core.schema.models import SchemaGraph
+from app.observability.metrics import set_schema_version
 from app.services.schema_service import build_pipeline, prepare_retriever
 
 __all__ = ["router"]
@@ -79,8 +80,10 @@ async def refresh_schema(request: Request) -> RefreshResponse:
 
     graph = await introspect(state.target_engine)
     retriever, schema_index_source = await prepare_retriever(
-        graph, state.llm, state.settings, state.schema_cache
+        graph, state.llm, state.settings, state.schema_cache, observer=state.schema_observer
     )
+    if state.settings.metrics_enabled:
+        set_schema_version(state.metrics, graph.version)
     # `build_pipeline` bakes `graph.version` into the new `QueryCache`, so a
     # refresh that changed the schema (even to a version with the same
     # tables re-hashed differently) starts every SQL/result-cache lookup
