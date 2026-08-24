@@ -27,6 +27,11 @@ def target_db_url(pg):  # sync psycopg url for seeding
         conn.execute("CREATE DATABASE app")
         conn.execute("CREATE ROLE app LOGIN PASSWORD 'app'")
         conn.execute("GRANT ALL PRIVILEGES ON DATABASE app TO app")
+        # roles.sql (executed below, against the target-db connection) now
+        # revokes CONNECT on `app` from PUBLIC -- mirror that here too, and
+        # keep an explicit CONNECT grant to `app` itself so its own
+        # connection (used by the app_db_url fixture) still works.
+        conn.execute("GRANT CONNECT ON DATABASE app TO app")
     a = admin.rsplit("/", 1)[0] + "/app"
     with psycopg.connect(a, autocommit=True) as conn:
         # Postgres 15+ no longer grants CREATE on the public schema to

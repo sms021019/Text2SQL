@@ -1,4 +1,5 @@
 import json
+import time
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -43,6 +44,7 @@ async def test_max_rows_applied_with_truncated_flag(readonly_async_url: str) -> 
 
 async def test_pg_sleep_raises_timeout_error(readonly_async_url: str) -> None:
     engine = create_async_engine(readonly_async_url)
+    start = time.perf_counter()
     try:
         with pytest.raises(ExecutionError) as exc_info:
             await execute_readonly(
@@ -50,10 +52,14 @@ async def test_pg_sleep_raises_timeout_error(readonly_async_url: str) -> None:
             )
     finally:
         await engine.dispose()
+    elapsed_s = time.perf_counter() - start
 
     assert exc_info.value.kind == "timeout"
     assert "statement timeout" in exc_info.value.pg_message.lower()
     assert str(exc_info.value) == f"timeout: {exc_info.value.pg_message}"
+    # Proves the per-transaction `statement_timeout_ms=200` fired, not the
+    # `readonly` role's own server-side 5s default (see `seed/roles.sql`).
+    assert elapsed_s < 2.0
 
 
 async def test_insert_raises_permission_error(readonly_async_url: str) -> None:

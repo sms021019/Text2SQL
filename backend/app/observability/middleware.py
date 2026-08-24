@@ -7,6 +7,7 @@ carries `request_id`), echoes it back in the response header, and logs one
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 
@@ -20,11 +21,25 @@ __all__ = ["RequestIDMiddleware"]
 logger = structlog.get_logger(__name__)
 
 _HEADER = "X-Request-ID"
+_MAX_LEN = 64
+_VALID = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _resolve_request_id(inbound: str | None) -> str:
+    """Accept an inbound `X-Request-ID` only if it's a reasonably-shaped
+    token (bounded length, safe charset) -- otherwise generate a fresh one
+    rather than let an arbitrary client-controlled string flow unbounded
+    into logs and the response header."""
+    if inbound:
+        candidate = inbound[:_MAX_LEN]
+        if _VALID.match(candidate):
+            return candidate
+    return str(uuid.uuid4())
 
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        request_id = request.headers.get(_HEADER) or str(uuid.uuid4())
+        request_id = _resolve_request_id(request.headers.get(_HEADER))
         request.state.request_id = request_id
 
         structlog.contextvars.clear_contextvars()

@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=("../.env", ".env"), extra="ignore")
 
     app_db_url: str = "postgresql+asyncpg://app:app@localhost:5432/app"
     target_db_url: str = "postgresql+asyncpg://readonly:readonly@localhost:5432/target"

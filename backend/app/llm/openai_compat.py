@@ -49,7 +49,7 @@ class OpenAICompatClient:
             raise LLMError(f"openai chat request failed: {exc}") from exc
         latency_ms = (time.perf_counter() - start) * 1000
         if resp.is_error:
-            raise LLMError(f"openai chat failed: {resp.status_code} {resp.text}")
+            raise LLMError(f"openai chat failed: {resp.status_code} {resp.text[:300]}")
         try:
             data = resp.json()
             text: str = data["choices"][0]["message"]["content"]
@@ -60,7 +60,7 @@ class OpenAICompatClient:
                 latency_ms=latency_ms,
             )
             model: str = data.get("model", self.model)
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError) as exc:
             raise LLMError(f"openai chat returned an unexpected response shape: {exc}") from exc
         return Completion(text=text, usage=usage, model=model)
 
@@ -74,12 +74,12 @@ class OpenAICompatClient:
         except httpx.HTTPError as exc:
             raise LLMError(f"openai embed request failed: {exc}") from exc
         if resp.is_error:
-            raise LLMError(f"openai embed failed: {resp.status_code} {resp.text}")
+            raise LLMError(f"openai embed failed: {resp.status_code} {resp.text[:300]}")
         try:
             data = resp.json()
             items = sorted(data["data"], key=lambda item: item["index"])
             embeddings: list[list[float]] = [item["embedding"] for item in items]
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError) as exc:
             raise LLMError(f"openai embed returned an unexpected response shape: {exc}") from exc
         return embeddings
 

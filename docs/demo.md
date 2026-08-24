@@ -98,7 +98,7 @@ does, call it directly:
 
 ```bash
 cd backend
-python -c "
+python -m uv run python -c "
 from app.core.sql.guard import guard_sql, GuardError
 try:
     guard_sql('DELETE FROM orders', {'orders'}, max_rows=500)

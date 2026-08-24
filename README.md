@@ -132,6 +132,8 @@ the pipeline changes.
 
 ## Running tests
 
+Requires Python 3.12 and `pip install uv` (invoked as `python -m uv`).
+
 ```bash
 make test      # cd backend && uv run pytest -q — needs Docker (testcontainers spins up real Postgres)
 make lint      # ruff check, ruff format --check, mypy app — all in backend/

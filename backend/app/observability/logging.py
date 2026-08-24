@@ -23,6 +23,7 @@ __all__ = ["configure_logging"]
 _SHARED_PROCESSORS: list[structlog.types.Processor] = [
     structlog.contextvars.merge_contextvars,
     structlog.stdlib.add_log_level,
+    structlog.stdlib.ExtraAdder(),
     structlog.stdlib.add_logger_name,
     structlog.processors.TimeStamper(fmt="iso"),
 ]

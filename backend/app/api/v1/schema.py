@@ -5,16 +5,21 @@ index, and swap in a fresh `Text2SQLPipeline`).
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
-from app.api.deps import get_graph
+from app.api.deps import _require_ready, get_graph
 from app.core.pipeline import Text2SQLPipeline
 from app.core.schema.introspect import introspect
 from app.core.schema.models import SchemaGraph
 from app.core.schema.retrieve import SchemaRetriever
 
 __all__ = ["router"]
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -65,13 +70,28 @@ async def get_schema(graph: SchemaGraph = Depends(get_graph)) -> SchemaResponse:
     return SchemaResponse(version=graph.version, tables=tables)
 
 
-@router.post("/schema/refresh", response_model=RefreshResponse)
+@router.post(
+    "/schema/refresh",
+    response_model=RefreshResponse,
+    dependencies=[Depends(_require_ready)],
+)
 async def refresh_schema(request: Request) -> RefreshResponse:
     state = request.app.state
 
     graph = await introspect(state.target_engine)
     retriever = SchemaRetriever(graph, state.llm, top_k=state.settings.retrieve_top_k)
-    await retriever.build_index()
+    try:
+        await asyncio.wait_for(
+            retriever.build_index(), timeout=state.settings.startup_embed_timeout_s
+        )
+    except TimeoutError:
+        logger.warning(
+            "schema index rebuild timed out after %ss, will retry lazily",
+            state.settings.startup_embed_timeout_s,
+        )
+        retriever.mark_build_failed(
+            f"embedding timed out during refresh after {state.settings.startup_embed_timeout_s}s"
+        )
     pipeline = Text2SQLPipeline(
         llm=state.llm,
         retriever=retriever,

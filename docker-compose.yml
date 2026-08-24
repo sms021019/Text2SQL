@@ -21,7 +21,7 @@ services:
       TARGET_DB_URL: postgresql+asyncpg://readonly:readonly@postgres:5432/target
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -29,7 +29,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "5173:80"
+      - "127.0.0.1:5173:80"
     depends_on:
       backend:
         condition: service_healthy
@@ -40,7 +40,7 @@ services:
     volumes:
       - ollama:/root/.ollama
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     healthcheck:
       # No curl in the ollama image -- `ollama list` talks to the local
       # server over its own client instead.
