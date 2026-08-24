@@ -75,13 +75,17 @@ Two layers:
   have been rejected earlier), not a breach.
 - Parsing cost is a few milliseconds per query — negligible next to LLM
   latency.
-- Rejections are precise and explainable (`guard:not_select`,
-  `guard:unknown_table: secrets`, `guard:forbidden_function: pg_sleep`,
-  ...) rather than an opaque database permission error, which is better UX
-  and also gives the pipeline a stable `GuardError.reason` to key off of —
-  in particular, to *never* trigger the one-shot repair loop (ADR-adjacent:
-  see `pipeline.py`'s `_REPAIRABLE_KINDS`). A rejected statement is
-  terminal; the pipeline does not ask the LLM to "fix" a `DELETE`.
+- Rejections are precise and explainable. `PipelineOutput.error` renders a
+  `GuardError` as `f"guard:{reason}: {detail}"` — e.g.
+  `guard:unknown_table: unknown table: secrets` or
+  `guard:forbidden_function: function pg_sleep() is not allowed` — rather
+  than an opaque database permission error, which is better UX and also
+  gives a caller a stable `reason` prefix (`guard:not_select`,
+  `guard:unknown_table`, `guard:forbidden_function`, ...) to key off of
+  without depending on the human-readable detail — in particular, to
+  *never* trigger the one-shot repair loop (ADR-adjacent: see
+  `pipeline.py`'s `_REPAIRABLE_KINDS`). A rejected statement is terminal;
+  the pipeline does not ask the LLM to "fix" a `DELETE`.
 - `known_tables` being the *retrieved* set rather than the whole schema
   means a change to retrieval (top-k, hop depth) can, as a side effect,
   change which tables a query is allowed to reference — this is

@@ -113,7 +113,7 @@ statement harmless.
 
 ## Switching LLM providers
 
-Set three env vars (see `.env.example`):
+Set these five env vars (see `.env.example`):
 
 ```bash
 LLM_PROVIDER=ollama            # or "openai"

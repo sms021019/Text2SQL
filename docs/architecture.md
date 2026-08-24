@@ -29,9 +29,9 @@ sequenceDiagram
     LLM-->>API: {sql, explanation}
     API->>Guard: guard_sql(sql, known_tables, max_rows)
     alt policy violation
-        Guard-->>API: GuardError(reason)
-        API->>AppDB: record_query(error="guard:reason")
-        API-->>Frontend: 200 {error: "guard:reason", rows: []}
+        Guard-->>API: GuardError(reason, detail)
+        API->>AppDB: record_query(error="guard:reason: detail")
+        API-->>Frontend: 200 {error: "guard:reason: detail", rows: []}
     else accepted
         Guard-->>API: guarded SQL (LIMIT applied)
         API->>Executor: execute_readonly(sql)

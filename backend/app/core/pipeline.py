@@ -11,7 +11,12 @@ not exist) it asks the LLM once for a repair and retries guard + execute.
 Every other failure -- an LLM transport error, a policy violation (a write,
 an unknown table, ...), an unparsable response, a timeout/permission error,
 or a second failed execution -- is terminal: `run()` never raises for these,
-it reports them via `PipelineOutput.error` instead. A `GuardError` is always
+it reports them via `PipelineOutput.error` instead, as a stable
+`"<stage>: <message>"` string -- `f"llm: {exc}"`, `f"parse: {exc}"`,
+`f"execution:{exc.kind}: {exc.pg_message}"`, or, for a guard rejection,
+`f"guard:{exc.reason}: {exc.detail}"` (e.g. `"guard:not_select: expected a
+SELECT, found DELETE"`) -- so a caller can match on the stage/reason prefix
+without depending on the human-readable detail. A `GuardError` is always
 terminal, deliberately: the pipeline does not ask the LLM to "fix" a
 `DELETE`. Unexpected exceptions (bugs) are not caught here and propagate.
 
@@ -222,7 +227,7 @@ class Text2SQLPipeline:
                 repaired=False,
                 usage=usage,
                 timings=timings,
-                error=f"guard:{exc.reason}",
+                error=f"guard:{exc.reason}: {exc.detail}",
             )
 
     async def _repair(
@@ -281,7 +286,7 @@ class Text2SQLPipeline:
                 repaired=True,
                 usage=usage,
                 timings=timings,
-                error=f"guard:{inner.reason}",
+                error=f"guard:{inner.reason}: {inner.detail}",
             )
 
         self._log_repair_stage(timings, start)

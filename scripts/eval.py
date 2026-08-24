@@ -112,6 +112,21 @@ def load_questions(path: Path) -> list[QuestionSpec]:
     return specs
 
 
+def _request_failure(spec: QuestionSpec, start: float, error: str) -> EvalResult:
+    latency_ms = (time.perf_counter() - start) * 1000
+    return EvalResult(
+        id=spec.id,
+        question=spec.question,
+        executable=False,
+        row_match=None,
+        row_count=None,
+        expect_rows=spec.expect_rows,
+        latency_ms=latency_ms,
+        tokens=0,
+        error=error,
+    )
+
+
 def run_one(client: httpx.Client, api_url: str, spec: QuestionSpec) -> EvalResult:
     start = time.perf_counter()
     try:
@@ -119,18 +134,12 @@ def run_one(client: httpx.Client, api_url: str, spec: QuestionSpec) -> EvalResul
         resp.raise_for_status()
         body: dict[str, Any] = resp.json()
     except httpx.HTTPError as exc:
-        latency_ms = (time.perf_counter() - start) * 1000
-        return EvalResult(
-            id=spec.id,
-            question=spec.question,
-            executable=False,
-            row_match=None,
-            row_count=None,
-            expect_rows=spec.expect_rows,
-            latency_ms=latency_ms,
-            tokens=0,
-            error=f"http: {exc}",
-        )
+        return _request_failure(spec, start, f"http: {exc}")
+    except ValueError as exc:
+        # resp.json() raises a json.JSONDecodeError (a ValueError subclass)
+        # on a non-JSON or malformed body -- treat that as a per-question
+        # failure too, not a reason to abort the whole eval run.
+        return _request_failure(spec, start, f"invalid json response: {exc}")
     latency_ms = (time.perf_counter() - start) * 1000
 
     error = body.get("error")
