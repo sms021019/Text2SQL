@@ -26,7 +26,13 @@ services:
       postgres:
         condition: service_healthy
 
-  # frontend:  # Task 13 adds the frontend service here.
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
 
   ollama:
     image: ollama/ollama
