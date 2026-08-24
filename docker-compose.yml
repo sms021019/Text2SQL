@@ -11,6 +11,18 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+
   backend:
     build:
       context: .
@@ -20,10 +32,13 @@ services:
       APP_DB_URL: postgresql+asyncpg://app:app@postgres:5432/app
       TARGET_DB_URL: postgresql+asyncpg://readonly:readonly@postgres:5432/target
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434}
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   frontend:
@@ -63,4 +78,5 @@ services:
 
 volumes:
   pgdata:
+  redisdata:
   ollama:

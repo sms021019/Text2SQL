@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     prompt_version: str = "v1"
     cors_origins: list[str] = ["http://localhost:5173"]
 
+    redis_url: str = "redis://localhost:6379/0"
+    cache_enabled: bool = True
+    sql_cache_ttl_s: int = 86400
+    result_cache_ttl_s: int = 300
+    schema_cache_ttl_s: int = 604800
+
     log_level: str = "INFO"
     #: Path to the few-shot examples YAML, relative to the CWD the app is
     #: launched from (`backend/` locally; in the Docker image `seed/` is
