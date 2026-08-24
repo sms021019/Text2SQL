@@ -1,10 +1,17 @@
 """`prepare_retriever()`: build a `SchemaRetriever` for a freshly-introspected
 `SchemaGraph`, preferring a cached embedding index over calling the LLM.
+`build_pipeline()`: build the matching `QueryCache` + `Text2SQLPipeline`
+pair for a given schema graph/retriever.
 
 Shared by `app.main`'s lifespan (cold start) and `POST /api/v1/schema/refresh`
 (`app/api/v1/schema.py`) so the "load from cache, else bounded-embed-then-store"
 flow -- including the startup-embed-timeout tolerance `app.main` already had
-before this helper existed -- lives in exactly one place.
+before this helper existed -- lives in exactly one place. Likewise,
+`build_pipeline()` exists so both call sites construct the query cache (which
+bakes in `graph.version` at construction time -- see
+`app.cache.query_cache.QueryCache`) and the pipeline pointed at it the same
+way; a schema refresh that only swapped `state.graph` without rebuilding both
+would keep serving cache entries keyed to the *old* schema version forever.
 """
 
 from __future__ import annotations
@@ -13,13 +20,20 @@ import asyncio
 import logging
 from typing import Literal
 
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from app.cache.query_cache import QueryCache
+from app.cache.redis import RedisCache
 from app.cache.schema_cache import SchemaCache
 from app.config import Settings
+from app.core.observer import PipelineObserver
+from app.core.pipeline import Text2SQLPipeline
+from app.core.prompting.builder import PromptBuilder
 from app.core.schema.models import SchemaGraph
 from app.core.schema.retrieve import SchemaRetriever
 from app.llm.base import LLMClient
 
-__all__ = ["prepare_retriever", "SchemaIndexSource"]
+__all__ = ["build_pipeline", "prepare_retriever", "SchemaIndexSource"]
 
 logger = logging.getLogger(__name__)
 
@@ -83,3 +97,38 @@ async def prepare_retriever(
     await schema_cache.store(graph, names, matrix)
     logger.info("schema_cache_store version=%s", graph.version)
     return retriever, "embedded"
+
+
+def build_pipeline(
+    *,
+    llm: LLMClient,
+    retriever: SchemaRetriever,
+    graph: SchemaGraph,
+    builder: PromptBuilder,
+    target_engine: AsyncEngine,
+    settings: Settings,
+    redis: RedisCache,
+    observer: PipelineObserver | None = None,
+) -> tuple[Text2SQLPipeline, QueryCache]:
+    """Build the `QueryCache` for `graph.version` and the `Text2SQLPipeline`
+    wired to use it, together -- see the module docstring for why these two
+    must always be constructed as a pair."""
+    query_cache = QueryCache(
+        redis,
+        schema_version=graph.version,
+        model=settings.llm_model,
+        prompt_version=settings.prompt_version,
+        sql_ttl_s=settings.sql_cache_ttl_s,
+        result_ttl_s=settings.result_cache_ttl_s,
+    )
+    pipeline = Text2SQLPipeline(
+        llm=llm,
+        retriever=retriever,
+        graph=graph,
+        builder=builder,
+        target_engine=target_engine,
+        settings=settings,
+        observer=observer,
+        cache=query_cache,
+    )
+    return pipeline, query_cache

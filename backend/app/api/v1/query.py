@@ -28,6 +28,8 @@ router = APIRouter()
 
 class QueryRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
+    use_cache: bool = True
+    use_result_cache: bool = False
 
 
 class TimingOut(BaseModel):
@@ -54,6 +56,7 @@ class QueryResponse(BaseModel):
     usage: UsageOut
     error: str | None
     request_id: str
+    cache_status: str
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -63,7 +66,9 @@ async def run_query(
     pipeline: Text2SQLPipeline = Depends(get_pipeline),
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
 ) -> QueryResponse:
-    out = await pipeline.run(body.question)
+    out = await pipeline.run(
+        body.question, use_cache=body.use_cache, use_result_cache=body.use_result_cache
+    )
     request_id: str = request.state.request_id
 
     try:
@@ -98,4 +103,5 @@ async def run_query(
         ),
         error=out.error,
         request_id=request_id,
+        cache_status=out.cache_status,
     )

@@ -25,7 +25,7 @@ from app.api.router import router
 from app.cache.redis import RedisCache
 from app.cache.schema_cache import SchemaCache
 from app.config import Settings, get_settings
-from app.core.pipeline import Text2SQLPipeline
+from app.core.observer import NullObserver, PipelineObserver
 from app.core.prompting.builder import PromptBuilder
 from app.core.schema.introspect import introspect
 from app.db.migrate import upgrade_to_head
@@ -34,7 +34,7 @@ from app.llm.base import LLMClient
 from app.llm.factory import build_llm
 from app.observability.logging import configure_logging
 from app.observability.middleware import RequestIDMiddleware
-from app.services.schema_service import prepare_retriever
+from app.services.schema_service import build_pipeline, prepare_retriever
 
 __all__ = ["app", "create_app"]
 
@@ -61,13 +61,16 @@ def create_app(
     settings: Settings | None = None,
     llm: LLMClient | None = None,
     redis: RedisCache | None = None,
+    observer: PipelineObserver | None = None,
 ) -> FastAPI:
-    """Build the FastAPI app. `settings`/`llm`/`redis` are injectable so
-    tests can point at a container database, a `FakeLLM`, and a specific
-    `RedisCache` instead of the real services `get_settings()`/`build_llm()`
-    (and a `RedisCache` built from `settings.redis_url`) would otherwise
+    """Build the FastAPI app. `settings`/`llm`/`redis`/`observer` are
+    injectable so tests can point at a container database, a `FakeLLM`, a
+    specific `RedisCache`, and a recording `PipelineObserver` instead of the
+    real services `get_settings()`/`build_llm()` (and a `RedisCache` built
+    from `settings.redis_url`, and a no-op `NullObserver`) would otherwise
     resolve."""
     resolved_settings = settings or get_settings()
+    resolved_observer: PipelineObserver = observer if observer is not None else NullObserver()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -100,13 +103,15 @@ def create_app(
         examples = _load_examples(resolved_settings.examples_path)
         builder = PromptBuilder(resolved_settings.prompt_version, examples)
 
-        pipeline = Text2SQLPipeline(
+        pipeline, query_cache = build_pipeline(
             llm=app_llm,
             retriever=retriever,
             graph=graph,
             builder=builder,
             target_engine=target_engine,
             settings=resolved_settings,
+            redis=redis_cache,
+            observer=resolved_observer,
         )
 
         app.state.settings = resolved_settings
@@ -120,6 +125,8 @@ def create_app(
         app.state.graph = graph
         app.state.retriever = retriever
         app.state.builder = builder
+        app.state.observer = resolved_observer
+        app.state.query_cache = query_cache
         app.state.pipeline = pipeline
         app.state.ready = True
 

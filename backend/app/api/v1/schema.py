@@ -9,10 +9,9 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 from app.api.deps import _require_ready, get_graph
-from app.core.pipeline import Text2SQLPipeline
 from app.core.schema.introspect import introspect
 from app.core.schema.models import SchemaGraph
-from app.services.schema_service import prepare_retriever
+from app.services.schema_service import build_pipeline, prepare_retriever
 
 __all__ = ["router"]
 
@@ -82,13 +81,19 @@ async def refresh_schema(request: Request) -> RefreshResponse:
     retriever, schema_index_source = await prepare_retriever(
         graph, state.llm, state.settings, state.schema_cache
     )
-    pipeline = Text2SQLPipeline(
+    # `build_pipeline` bakes `graph.version` into the new `QueryCache`, so a
+    # refresh that changed the schema (even to a version with the same
+    # tables re-hashed differently) starts every SQL/result-cache lookup
+    # fresh rather than serving entries keyed to the old version.
+    pipeline, query_cache = build_pipeline(
         llm=state.llm,
         retriever=retriever,
         graph=graph,
         builder=state.builder,
         target_engine=state.target_engine,
         settings=state.settings,
+        redis=state.redis,
+        observer=state.observer,
     )
 
     # No `await` between here and the assignments above, so this swap is
@@ -96,6 +101,7 @@ async def refresh_schema(request: Request) -> RefreshResponse:
     state.graph = graph
     state.retriever = retriever
     state.pipeline = pipeline
+    state.query_cache = query_cache
     state.schema_index_source = schema_index_source
 
     return RefreshResponse(version=graph.version)
