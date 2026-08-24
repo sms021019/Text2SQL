@@ -15,6 +15,7 @@ import pytest
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 
+from app.cache.keys import result_cache_key
 from app.cache.redis import RedisCache
 from app.config import Settings
 from app.llm.base import Usage
@@ -167,12 +168,151 @@ async def test_guard_rejected_sql_is_never_cached(settings: Settings, redis_url:
 
     checker = RedisCache(redis_url)
     try:
-        # `delete_prefix` returns the count it deleted -- zero means nothing
-        # was ever stored under "sql:" for this run.
+        # Prove Redis is actually reachable and `delete_prefix`'s count is
+        # trustworthy first -- otherwise a `0` below is indistinguishable
+        # from Redis being down (see the graceful-degradation tests), which
+        # would make this assertion vacuously true either way.
+        assert await checker.ping() is True
+        await checker.set_json("sql:sentinel", {"v": 1}, ttl_s=60)
+        assert await checker.delete_prefix("sql:") == 1
+
+        # ... and *now* zero really does mean nothing was ever stored under
+        # "sql:"/"res:" for this run.
         assert await checker.delete_prefix("sql:") == 0
         assert await checker.delete_prefix("res:") == 0
     finally:
         await checker.aclose()
+
+
+async def test_sql_hit_with_repairable_execution_failure_evicts_and_falls_through(
+    settings: Settings, redis_url: str
+) -> None:
+    """A SQL-tier hit whose cached statement fails execution with a
+    repairable `ExecutionError.kind` (here `"syntax"`, from Postgres'
+    `undefined_table`) self-heals: the stale entry is evicted and the
+    question falls through to a full retrieve-through-execute run -- see
+    `Text2SQLPipeline._sql_hit`/`_should_evict`."""
+    llm = FakeLLM([GOOD_RESPONSE])
+    app = create_app(settings=settings, llm=llm)
+    question = "How many orders are there?"
+
+    async with LifespanManager(app):
+        query_cache = app.state.query_cache
+        key = query_cache.key_for(question)
+
+        seeder = RedisCache(redis_url)
+        try:
+            # The guard only validates against *this cached entry's own*
+            # `tables` list, not the live schema -- so listing
+            # "nonexistent_table" here (as if it used to be a real table
+            # before some past schema change) lets the statement clear the
+            # guard, exactly as a genuinely stale cache entry would. The
+            # database then rejects it for real: `undefined_table` (SQLSTATE
+            # 42P01), classified as the repairable "syntax" kind.
+            await seeder.set_json(
+                key,
+                {
+                    "sql": "SELECT * FROM nonexistent_table",
+                    "explanation": "stale cached answer",
+                    "tables": ["orders", "nonexistent_table"],
+                },
+                ttl_s=60,
+            )
+        finally:
+            await seeder.aclose()
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/v1/query", json={"question": question})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cache_status"] == "miss"
+    assert body["error"] is None
+    assert len(llm.calls) == 1
+
+    checker = RedisCache(redis_url)
+    try:
+        replaced = await checker.get_json(key)
+        assert replaced is not None
+        assert replaced["sql"] != "SELECT * FROM nonexistent_table"
+        # The evicted entry's result-tier sibling (there wasn't one seeded
+        # here, but `delete_sql` always deletes both) is gone too.
+        assert await checker.get_json(result_cache_key(sql_key=key)) is None
+    finally:
+        await checker.aclose()
+
+
+async def test_sql_hit_with_guard_rejection_evicts_without_fallthrough(
+    settings: Settings, redis_url: str
+) -> None:
+    """A SQL-tier hit whose cached statement is rejected by the guard (a
+    policy that tightened since it was cached, or simply a poisoned entry)
+    is evicted but does *not* fall through to a fresh generation -- a guard
+    rejection is about the SQL text, not a stale-schema mismatch a
+    regeneration would fix."""
+    llm = FakeLLM([])
+    app = create_app(settings=settings, llm=llm)
+    question = "How many orders are there?"
+
+    async with LifespanManager(app):
+        query_cache = app.state.query_cache
+        key = query_cache.key_for(question)
+
+        seeder = RedisCache(redis_url)
+        try:
+            await seeder.set_json(
+                key,
+                {
+                    "sql": "DELETE FROM orders",
+                    "explanation": "stale cached answer",
+                    "tables": ["orders"],
+                },
+                ttl_s=60,
+            )
+        finally:
+            await seeder.aclose()
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/v1/query", json={"question": question})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cache_status"] == "sql_hit"
+    assert body["error"] is not None
+    assert body["error"].startswith("guard:")
+    assert llm.calls == []
+
+    checker = RedisCache(redis_url)
+    try:
+        assert await checker.get_json(key) is None
+        assert await checker.get_json(result_cache_key(sql_key=key)) is None
+    finally:
+        await checker.aclose()
+
+
+async def test_use_cache_false_emits_bypass_cache_events_on_both_tiers(settings: Settings) -> None:
+    observer = RecordingObserver()
+    llm = FakeLLM([GOOD_RESPONSE])
+    app = create_app(settings=settings, llm=llm, observer=observer)
+
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/query",
+                json={"question": "How many orders are there?", "use_cache": False},
+            )
+
+    assert resp.status_code == 200
+    assert resp.json()["cache_status"] == "bypass"
+
+    cache_events = [payload for kind, payload in observer.events if kind == "cache"]
+    assert cache_events == [
+        {"cache": "result", "outcome": "bypass"},
+        {"cache": "sql", "outcome": "bypass"},
+    ]
 
 
 async def test_use_cache_false_bypasses_cache_entirely(
@@ -220,12 +360,11 @@ async def test_observer_sees_cache_and_execution_hooks_on_happy_path(settings: S
             )
     assert resp.status_code == 200
 
-    # Startup (schema retrieval index build) also emits events on this same
-    # observer -- only inspect the events from this one request onward by
-    # anchoring on the pipeline-level cache-read pair, which only ever
-    # happens inside `Text2SQLPipeline.run()`.
-    cache_idx = observer.events.index(("cache", {"cache": "result", "outcome": "bypass"}))
-    events = observer.events[cache_idx:]
+    # This observer is only ever passed to `Text2SQLPipeline` -- startup's
+    # schema-retrieval index build (`prepare_retriever`/
+    # `SchemaRetriever.build_index()`) never touches it, so `observer.events`
+    # holds exactly this one request's `run()` call, from the start.
+    events = observer.events
 
     assert events[0] == ("cache", {"cache": "result", "outcome": "bypass"})
     assert events[1] == ("cache", {"cache": "sql", "outcome": "miss"})

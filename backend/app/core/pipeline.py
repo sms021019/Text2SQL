@@ -34,12 +34,23 @@ order:
 2. The **SQL** tier: a hit skips retrieve/render/generate/parse but still
    re-runs the guard (cheap defence-in-depth against a cache entry that
    predates a guard policy change) and execution, `cache_status="sql_hit"`.
-   If that execution fails, the stale entry is evicted
-   (`cache.delete_sql(key)`) and the question falls through to the full
-   retrieve-through-execute path below -- self-healing a cache poisoned by,
-   e.g., a schema change that outdated the cached SQL. The eventual
-   response's `cache_status` reflects that fallthrough (`"miss"`), not
-   `"sql_hit"`.
+   A guard rejection evicts the entry (`cache.delete_sql(key)`) and returns
+   the guard error directly -- no fallthrough, since a policy rejection is
+   about the SQL text itself, not a stale-schema mismatch a regeneration
+   would fix, so nothing is gained by burning a fresh LLM call on the same
+   question; evicting still matters, so a tightened guard policy does not
+   pin a now-forbidden statement in the cache for its full TTL. An
+   execution failure is handled more narrowly: only when
+   `ExecutionError.kind` is one `_repair()` would itself have retried for a
+   freshly-generated query (`_REPAIRABLE_KINDS` -- `"syntax"`/`"other"`,
+   `_should_evict()`) is the entry evicted and the question falls through to
+   the full retrieve-through-execute path below, self-healing a cache
+   poisoned by, e.g., a schema change that outdated the cached SQL -- the
+   eventual response's `cache_status` reflects that fallthrough (`"miss"`),
+   not `"sql_hit"`. A `"timeout"` or `"permission"` failure is an
+   environmental problem a fresh generation would hit identically (same
+   statement timeout, same read-only role), so it is terminal instead: the
+   entry is left cached and `cache_status` stays `"sql_hit"`.
 3. A **miss** on both runs the full path described above. On a successful
    execution the (possibly repaired) SQL is written back via
    `cache.set_sql()`, and, if `use_result_cache=True`, the result via
@@ -202,6 +213,21 @@ def _execution_outcome(exc: ExecutionError) -> str:
     return "timeout" if exc.kind == "timeout" else "db_error"
 
 
+def _should_evict(exc: ExecutionError) -> bool:
+    """Whether a SQL-tier cache hit's execution failure means the cached
+    statement itself is stale and worth evicting + regenerating (see
+    `Text2SQLPipeline._sql_hit`).
+
+    Uses the exact same `_REPAIRABLE_KINDS` test `_full_path`/`_repair` use
+    to decide whether a *freshly generated* query is worth one repair
+    attempt: `"syntax"`/`"other"` plausibly means the statement no longer
+    matches the current schema (evict, regenerate); `"timeout"`/
+    `"permission"` is an environmental failure a fresh generation would hit
+    identically, so the cached entry is not to blame and stays cached.
+    """
+    return exc.kind in _REPAIRABLE_KINDS
+
+
 class Text2SQLPipeline:
     """Runs one natural-language question through schema retrieval, LLM
     generation, guarding, and read-only execution -- with a single repair
@@ -250,6 +276,8 @@ class Text2SQLPipeline:
             return await self._full_path(question, cache_status="disabled")
         cache = self._cache
         if not use_cache:
+            self._observer.on_cache(cache="result", outcome="bypass")
+            self._observer.on_cache(cache="sql", outcome="bypass")
             return await self._full_path(question, cache_status="bypass")
 
         key = cache.key_for(question)
@@ -320,6 +348,10 @@ class Text2SQLPipeline:
         except GuardError as exc:
             self._observer.on_guard_reject(exc.reason)
             self._observer.on_execution(outcome="rejected", ms=0.0)
+            # Evict even though there is no fallthrough: a guard policy that
+            # tightened since this entry was cached should not keep pinning
+            # a now-forbidden statement for the rest of its TTL.
+            await cache.delete_sql(key)
             return self._finish(
                 sql=sql,
                 explanation=explanation,
@@ -342,6 +374,22 @@ class Text2SQLPipeline:
                 )
         except ExecutionError as exc:
             self._observer.on_execution(outcome=_execution_outcome(exc), ms=timings[-1].ms)
+            if not _should_evict(exc):
+                # Environmental failure (timeout/permission): a fresh
+                # generation would hit the same wall, so the cached entry is
+                # not at fault -- leave it cached and report the error
+                # directly rather than burning an LLM call that cannot help.
+                return self._finish(
+                    sql=guarded_sql,
+                    explanation=explanation,
+                    result=None,
+                    tables=tables,
+                    repaired=False,
+                    usage=usage,
+                    timings=timings,
+                    error=f"execution:{exc.kind}: {exc.pg_message}",
+                    cache_status="sql_hit",
+                )
             await cache.delete_sql(key)
             return await self._full_path(
                 question, cache_status="miss", cache_key=key, use_result_cache=use_result_cache

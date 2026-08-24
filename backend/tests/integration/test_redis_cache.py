@@ -61,6 +61,39 @@ async def test_get_bytes_miss_returns_none(cache) -> None:
     assert await cache.get_bytes("schema:missing") is None
 
 
+async def test_delete_removes_exact_keys_only(cache) -> None:
+    await cache.set_json("sql:x1", {"v": 1}, ttl_s=60)
+    await cache.set_json("sql:x1extra", {"v": 2}, ttl_s=60)
+
+    deleted = await cache.delete("sql:x1")
+
+    assert deleted == 1
+    assert await cache.get_json("sql:x1") is None
+    # A key that merely shares "sql:x1" as a *prefix* must survive --
+    # unlike `delete_prefix()`, `delete()` is exact-key (UNLINK/DEL), not a
+    # SCAN-matched prefix.
+    assert await cache.get_json("sql:x1extra") == {"v": 2}
+
+
+async def test_delete_multiple_keys_at_once(cache) -> None:
+    await cache.set_json("sql:a", {"v": 1}, ttl_s=60)
+    await cache.set_json("res:a", {"v": 2}, ttl_s=60)
+
+    deleted = await cache.delete("sql:a", "res:a")
+
+    assert deleted == 2
+    assert await cache.get_json("sql:a") is None
+    assert await cache.get_json("res:a") is None
+
+
+async def test_delete_with_no_matching_keys_returns_zero(cache) -> None:
+    assert await cache.delete("sql:does-not-exist") == 0
+
+
+async def test_delete_with_no_keys_given_returns_zero(cache) -> None:
+    assert await cache.delete() == 0
+
+
 async def test_delete_prefix_removes_only_matching_keys(cache) -> None:
     await cache.set_json("sql:x1", {"v": 1}, ttl_s=60)
     await cache.set_json("sql:x2", {"v": 2}, ttl_s=60)
@@ -113,6 +146,7 @@ async def test_disabled_cache_never_touches_redis(redis_url) -> None:
     assert await c.set_json("sql:whatever", {"a": 1}, ttl_s=60) is False
     assert await c.get_bytes("schema:v1") is None
     assert await c.set_bytes("schema:v1", b"x", ttl_s=60) is False
+    assert await c.delete("sql:whatever") == 0
     assert await c.delete_prefix("sql:") == 0
     assert await c.ping() is False
     assert c.last_error is None
@@ -151,6 +185,11 @@ async def test_set_bytes_returns_false_when_unreachable(unreachable_cache) -> No
     assert unreachable_cache.last_error is not None
 
 
+async def test_delete_returns_zero_when_unreachable(unreachable_cache) -> None:
+    assert await unreachable_cache.delete("sql:x") == 0
+    assert unreachable_cache.last_error is not None
+
+
 async def test_delete_prefix_returns_zero_when_unreachable(unreachable_cache) -> None:
     assert await unreachable_cache.delete_prefix("sql:") == 0
     assert unreachable_cache.last_error is not None
@@ -169,6 +208,7 @@ async def test_unreachable_cache_never_raises() -> None:
     await c.set_json("sql:x", {"a": 1}, ttl_s=60)
     await c.get_bytes("sql:x")
     await c.set_bytes("sql:x", b"y", ttl_s=60)
+    await c.delete("sql:x")
     await c.delete_prefix("sql:")
     await c.ping()
     await c.aclose()

@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import get_pipeline, get_session_factory
-from app.core.pipeline import Text2SQLPipeline
+from app.core.pipeline import CacheStatus, Text2SQLPipeline
 from app.db.query_log import record_query
 
 __all__ = ["router"]
@@ -56,7 +56,7 @@ class QueryResponse(BaseModel):
     usage: UsageOut
     error: str | None
     request_id: str
-    cache_status: str
+    cache_status: CacheStatus
 
 
 @router.post("/query", response_model=QueryResponse)

@@ -120,6 +120,7 @@ def build_pipeline(
         prompt_version=settings.prompt_version,
         sql_ttl_s=settings.sql_cache_ttl_s,
         result_ttl_s=settings.result_cache_ttl_s,
+        result_max_bytes=settings.result_cache_max_bytes,
     )
     pipeline = Text2SQLPipeline(
         llm=llm,

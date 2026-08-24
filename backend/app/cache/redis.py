@@ -87,6 +87,27 @@ class RedisCache:
     async def set_bytes(self, key: str, value: bytes, *, ttl_s: int) -> bool:
         return await self._set_raw(key, value, ttl_s=ttl_s)
 
+    async def delete(self, *keys: str) -> int:
+        """Delete zero or more exact (unprefixed) keys, e.g.
+        `"sql:<hash>"`/`"res:<hash>"`; returns the count actually removed.
+        Fail-open like every other public method here -- an unreachable
+        Redis logs and returns `0`, never raises.
+        """
+        if not self._enabled or not keys:
+            return 0
+        prefixed = [self._prefixed(k) for k in keys]
+        try:
+            result: int = await self._client.unlink(*prefixed)
+            return result
+        except (RedisError, OSError):
+            pass
+        try:
+            result = await self._client.delete(*prefixed)
+            return result
+        except (RedisError, OSError) as err:
+            self._record_error(err)
+            return 0
+
     async def delete_prefix(self, prefix: str) -> int:
         if not self._enabled:
             return 0

@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     sql_cache_ttl_s: int = 86400
     result_cache_ttl_s: int = 300
     schema_cache_ttl_s: int = 604800
+    #: A serialised result-cache entry (sql + explanation + tables + a full
+    #: `QueryResult`, JSON-encoded) larger than this is never stored -- see
+    #: `QueryCache.set_result`. Guards against a single huge row set evicting
+    #: everything else out of Redis under an LRU/memory-pressure policy.
+    result_cache_max_bytes: int = 1_048_576
 
     log_level: str = "INFO"
     #: Path to the few-shot examples YAML, relative to the CWD the app is
