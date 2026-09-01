@@ -63,7 +63,7 @@ result table. The stack also publishes:
 | URL | What |
 |---|---|
 | http://localhost:5173 | Frontend |
-| http://localhost:8000/docs | API (OpenAPI UI); metrics at `/metrics/` |
+| http://localhost:8000/docs | API (OpenAPI UI); metrics at `/metrics` |
 | http://localhost:9090 | Prometheus |
 | http://localhost:3000 | Grafana → *Text2SQL overview* (anonymous viewer; `admin`/`admin` to edit) |
 
@@ -145,10 +145,10 @@ The pipeline reports every event (stage timing, LLM usage, guard rejection,
 execution outcome, cache read) to a `PipelineObserver` protocol defined in
 `app/core` — which knows nothing about Prometheus. The app layer's
 `MetricsObserver` turns those into `t2s_*` collectors, exposed at
-`/metrics/` alongside `prometheus-fastapi-instrumentator`'s `http_*` ones:
+`/metrics` alongside `prometheus-fastapi-instrumentator`'s `http_*` ones:
 
 ```bash
-curl -s http://localhost:8000/metrics/ | grep t2s_
+curl -s http://localhost:8000/metrics | grep t2s_
 ```
 
 `prometheus` scrapes that every 5 s; `grafana` provisions its datasource

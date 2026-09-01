@@ -66,6 +66,57 @@ terminal-vs-repairable distinction. The exceptions are request validation
 (`422` on an empty/too-long question) and a `503` from `GET /readyz`/the
 `get_pipeline` dependency while the schema index hasn't finished loading.
 
+## Phase 2 additions
+
+Phase 1's request path above is still the whole story for a cold question.
+Phase 2 wraps three caches, a job queue and a metrics pipeline around it —
+each designed in its own ADR ([0003 cache](decisions/0003-cache-design.md),
+[0004 async jobs](decisions/0004-async-jobs.md),
+[0005 observability](decisions/0005-observability.md)); the summary here is
+only how the pieces sit relative to the diagram.
+
+**Cache tiers.** All three live in Redis behind `app/cache/redis.py`, which
+swallows every Redis error and timeout: with Redis down the API answers
+exactly as it did in Phase 1, only slower.
+
+| Tier | Key | Populated | Read |
+|---|---|---|---|
+| Schema index | `schema:{graph.version}` | startup / `POST /schema/refresh`, after embedding every table summary | startup, to skip the embed pass entirely |
+| SQL | `sql:{sha256(schema_version\|model\|prompt_version\|normalised_question)[:32]}` | after a successful run | before `retrieve`; a hit skips retrieve→generate but **re-runs the guard and the executor** |
+| Result | `res:{same digest}` | after a successful run, `use_result_cache=True` only | before the SQL tier, opt-in; a hit skips the target DB too |
+
+Baking `schema_version`/`model`/`prompt_version` into the digest is what
+makes invalidation implicit: a schema refresh, a model swap or a prompt
+bump simply stops addressing the old entries. Explicit eviction is narrow —
+a SQL-tier hit that the guard now rejects deletes both tiers for that
+digest; an execution failure on a cached statement evicts only when the
+error looks like the *statement's* fault (`app/core/pipeline.py`'s
+`_should_evict`). Errors are never cached, at any tier, and a result larger
+than `RESULT_CACHE_MAX_BYTES` is silently not stored.
+`PipelineOutput.cache_status` reports which path the request took:
+`disabled` (`CACHE_ENABLED=false`), `bypass` (`use_cache=false` on the
+request), `miss`, `sql_hit`, `result_hit`.
+
+**Async jobs.** `POST /api/v1/query/async` enqueues onto arq (Redis) and
+returns `202 {job_id}`; `GET /api/v1/jobs/{job_id}` polls it. The worker
+(`app/jobs/worker.py`) builds its runtime with the very same
+`app.services.bootstrap.build_components()` the API lifespan uses, so a job
+runs the identical pipeline, caches and schema version — and writes the
+same `query_log` row, carrying the enqueueing request's `request_id`
+through. A dead queue degrades only the async endpoints (503); the
+synchronous route is unaffected.
+
+**Metrics.** The pipeline reports events to a `PipelineObserver` protocol
+defined in `app/core/observer.py`, which imports nothing framework-shaped.
+The app layer's `MetricsObserver` (`app/observability/metrics.py`) turns
+those into `t2s_*` collectors on a per-app `CollectorRegistry`, served at
+`GET /metrics` and scraped by Prometheus into the Grafana dashboard under
+`deploy/`. The core never learns that Prometheus exists.
+
+```
+pipeline → PipelineObserver → MetricsObserver → /metrics → Prometheus → Grafana
+```
+
 ## Components
 
 | Module | Responsibility |

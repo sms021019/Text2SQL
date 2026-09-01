@@ -38,9 +38,11 @@ exposed: a dashboard someone can look at while a load test runs.
 3. **One `Metrics` per app, owning its own `CollectorRegistry`.** Built in
    `create_app()`, never at import time: the process-global default registry
    would make every second app in a test process collide on duplicate
-   collector names. `/metrics` is mounted with
-   `make_asgi_app(registry=...)` against that same registry, and
-   `METRICS_ENABLED=false` skips instrumentation and the endpoint entirely.
+   collector names. `/metrics` is exposed against that same registry by
+   `Instrumentator(registry=...).instrument(app).expose(app)` -- a plain
+   route rather than a mounted sub-app, so a slash-less `GET /metrics`
+   answers directly instead of 307ing -- and `METRICS_ENABLED=false` skips
+   instrumentation and the endpoint entirely.
 
 4. **The metric set** (names fixed, all `t2s_`-prefixed):
    `t2s_llm_request_duration_seconds{provider,model,stage}` (buckets
@@ -115,6 +117,18 @@ exposed: a dashboard someone can look at while a load test runs.
   needs its multiprocess-directory dance under gunicorn; the deployment
   answer here is one uvicorn worker per container and horizontal scaling —
   which is what Phase 4's Kubernetes manifests will do anyway.
+- **`t2s_llm_request_duration_seconds` has no `stage="embed"` series, even
+  though an embedding call happens on every full-path request.**
+  `SchemaRetriever._score_tables` calls `LLMClient.embed()` to embed the
+  question (`app/core/schema/retrieve.py`), but `embed()` returns bare
+  vectors and no `Usage`, so there is nothing for the pipeline to hand to
+  `observer.on_llm(...)` — only `generate` and `repair` reach it. The
+  embedding latency is therefore folded into
+  `t2s_pipeline_duration_seconds` and visible per-stage only in the logs.
+  Instrumenting it means widening `LLMClient.embed` to return a `Usage`
+  (both adapters, plus `FakeLLM`), which is deferred: the plan's metric set
+  lists `stage=embed`, but the interface change is a larger edit than the
+  Phase 2 brief covers.
 - The arq worker's metrics are recorded into a registry nothing scrapes
   (see ADR 0004). Job-level numbers come from its logs until it gets an
   endpoint of its own.

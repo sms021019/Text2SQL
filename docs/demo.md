@@ -186,18 +186,21 @@ response shape out ([ADR 0004](decisions/0004-async-jobs.md)).
 ## 8. The raw metrics
 
 ```bash
-curl -s http://localhost:8000/metrics/ | grep t2s_cache_requests_total
+curl -s http://localhost:8000/metrics | grep t2s_cache_requests_total
 ```
 
 ```
-t2s_cache_requests_total{cache="schema",outcome="hit"} 1.0
+t2s_cache_requests_total{cache="schema",outcome="miss"} 1.0
 t2s_cache_requests_total{cache="sql",outcome="miss"} 1.0
 t2s_cache_requests_total{cache="sql",outcome="hit"} 1.0
 t2s_cache_requests_total{cache="result",outcome="bypass"} 2.0
 ```
 
-(The trailing slash matters: `/metrics` is a mounted sub-app, so without it
-Starlette answers a 307 — `curl -sL` works too.)
+(`cache="schema"` is a `miss` on a first boot against a fresh Redis volume —
+nothing was cached to load, so the index was embedded and stored; it becomes
+`hit` once you restart the stack without wiping the volume. The grep also
+matches the `t2s_cache_requests_created` lines Prometheus' client emits
+alongside each counter.)
 
 Every `t2s_*` metric comes from the pipeline's observer hook, not from
 framework middleware: `app/core` reports events, the app layer decides they

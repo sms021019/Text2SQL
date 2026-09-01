@@ -1,6 +1,6 @@
 # Prometheus config for the local docker compose stack.
 #
-# One job: the FastAPI backend's /metrics endpoint, mounted in
+# One job: the FastAPI backend's /metrics endpoint, exposed in
 # `backend/app/main.py` against the app's own CollectorRegistry (every
 # `t2s_*` collector plus prometheus-fastapi-instrumentator's `http_*` ones).
 #
@@ -14,9 +14,8 @@ global:
 
 scrape_configs:
   - job_name: text2sql-backend
-    # The endpoint is a mounted ASGI sub-app, so Starlette answers /metrics
-    # with a 307 to /metrics/ -- Prometheus follows that redirect (curl
-    # needs -L, or the trailing slash, to see the same body).
+    # A plain route (Instrumentator.expose), not a mount: /metrics answers
+    # directly, with no trailing-slash redirect to follow.
     metrics_path: /metrics
     static_configs:
       # Container name and container port on the compose network -- not the

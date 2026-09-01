@@ -24,7 +24,7 @@
       "id": 1,
       "type": "timeseries",
       "title": "LLM latency by stage (p50 / p95)",
-      "description": "t2s_llm_request_duration_seconds, quantiles over a 5m window. Stages: generate (the first completion) and repair (the one-shot retry after a failed execution).",
+      "description": "t2s_llm_request_duration_seconds, quantiles over a 5m window. Stages: generate (the first completion) and repair (the one-shot retry after a failed execution). The question-embedding call is not reported to the observer (it returns no Usage), so there is no embed stage here -- see ADR 0005.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

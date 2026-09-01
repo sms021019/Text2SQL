@@ -46,11 +46,14 @@ export default function () {
   // Offset the walk by VU so the five VUs are on different questions at any
   // moment. A cache hit needs the *same* question asked twice with the
   // cache enabled, and one VU alone would need 11 iterations to come back
-  // around -- more than a 60 s run fits at LLM latency. Offsetting means VU
-  // n's question at iteration i was already asked by VU n-2 at iteration
-  // i-2 (both even, so both cache-enabled), which puts the first SQL-tier
-  // hits inside the first third of the run. Hits still require a reachable
-  // LLM: a failed run is never cached.
+  // around -- more than a 60 s run fits at LLM latency. The index is
+  // `(__VU + __ITER) % 10`, so it repeats whenever `__VU + __ITER` does:
+  // VU n at iteration i asks what VU n+2 already asked at iteration i-2
+  // (and, generally, VU n+2k at i-2k, for as long as that VU exists). i and
+  // i-2 always have the same parity, so on even iterations both the ask and
+  // the earlier one are cache-enabled -- which puts the first SQL-tier hits
+  // inside the first third of the run. Hits still require a reachable LLM:
+  // a failed run is never cached.
   const question = QUESTIONS[(__VU + __ITER) % QUESTIONS.length];
   // Alternate the cache on and off per iteration. Half the traffic
   // bypassing it keeps the hit-rate panel honest -- it then measures only
