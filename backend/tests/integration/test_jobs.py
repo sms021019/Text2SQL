@@ -91,11 +91,7 @@ async def _api(settings: Settings, llm: LLMClient) -> AsyncIterator[AsyncClient]
     app = create_app(settings=settings, llm=llm)
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
-        # `follow_redirects=True`: `app.mount("/metrics", ...)` 307s a
-        # trailing-slash-less `GET /metrics` (Starlette `Mount` default).
-        async with AsyncClient(
-            transport=transport, base_url="http://test", follow_redirects=True
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
             yield client
 
 
@@ -297,7 +293,8 @@ async def test_enqueue_returns_503_when_redis_is_unreachable_but_sync_query_stil
 
 async def test_queue_depth_gauge_tracks_pending_jobs(settings: Settings) -> None:
     async with _api(settings, FakeLLM([])) as client:
-        assert (await client.post("/api/v1/query/async", json={"question": QUESTION})).status_code
+        enqueued = await client.post("/api/v1/query/async", json={"question": QUESTION})
+        assert enqueued.status_code == 202
         depth: float | None = None
         deadline = asyncio.get_running_loop().time() + 5.0
         while asyncio.get_running_loop().time() < deadline:

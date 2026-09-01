@@ -18,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from app.api.deps import get_session_factory
 from app.config import Settings
 from app.db.models import QueryLog
 from app.main import create_app
@@ -161,3 +162,72 @@ async def test_query_writes_a_query_log_row(client: AsyncClient, app_db_url: str
     assert row.question == "How many orders are there?"
     assert row.success is True
     assert row.sql is not None
+
+
+class _BrokenSession:
+    """An `AsyncSession` stand-in for an app database that went away while
+    the row was being written: `commit()` raises, and so does closing it.
+
+    The second failure is the interesting one. A real `AsyncSession` whose
+    `commit()` failed is left rollback-required, and `async with`'s own
+    `__aexit__` -> `close()` can then raise a *second* `DBAPIError`. If the
+    caller owned the `async with`, that one would escape past
+    `persist_query_log`'s handler and turn an app-DB outage into a 500 --
+    which is exactly the regression this test pins.
+    """
+
+    def __init__(self) -> None:
+        self.commit_attempted = False
+        self.close_attempted = False
+
+    async def __aenter__(self) -> _BrokenSession:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        self.close_attempted = True
+        raise RuntimeError("app_db connection is closed (on close)")
+
+    def add(self, obj: object) -> None:
+        pass
+
+    async def flush(self) -> None:
+        pass
+
+    async def commit(self) -> None:
+        self.commit_attempted = True
+        raise RuntimeError("app_db connection is closed (on commit)")
+
+    async def refresh(self, obj: object) -> None:
+        pass
+
+
+@pytest.mark.parametrize("responses", [[GOOD_RESPONSE]])
+async def test_query_still_200s_when_the_app_db_fails_on_commit_and_on_close(
+    settings: Settings, responses: list[str]
+) -> None:
+    """`query_log` is best-effort: a dead app database costs the row, never
+    the answer -- see `app.services.query_service.persist_query_log`."""
+    sessions: list[_BrokenSession] = []
+
+    def broken_factory() -> _BrokenSession:
+        session = _BrokenSession()
+        sessions.append(session)
+        return session
+
+    app = create_app(settings=settings, llm=FakeLLM(responses))
+    app.dependency_overrides[get_session_factory] = lambda: broken_factory
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post("/api/v1/query", json={"question": "How many orders are there?"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["error"] is None
+    assert body["rows"] == [[20000]]
+
+    # Both failure points were actually reached -- otherwise the 200 above
+    # would prove nothing.
+    assert len(sessions) == 1
+    assert sessions[0].commit_attempted is True
+    assert sessions[0].close_attempted is True

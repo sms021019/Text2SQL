@@ -38,12 +38,10 @@ async def client(settings: Settings) -> AsyncIterator[AsyncClient]:
     app = create_app(settings=settings, llm=FakeLLM([GOOD_RESPONSE]))
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
-        # `follow_redirects=True`: `app.mount("/metrics", ...)` 307s a
-        # trailing-slash-less `GET /metrics` to `/metrics/` (Starlette's
-        # default `Mount` behaviour), same as `/api/v1/schema/` would.
-        async with AsyncClient(
-            transport=transport, base_url="http://test", follow_redirects=True
-        ) as ac:
+        # No `follow_redirects`: `/metrics` is a plain route, so a
+        # slash-less GET must answer 200 directly -- see
+        # `test_metrics_endpoint_answers_without_a_redirect`.
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
 
 
@@ -83,3 +81,35 @@ async def test_metrics_endpoint_has_http_samples_for_instrumented_routes_only(
     for line in body.splitlines():
         if line.startswith("http_request_duration_seconds") and "handler=" in line:
             assert '/healthz"' not in line
+
+
+async def test_metrics_endpoint_answers_without_a_redirect(client: AsyncClient) -> None:
+    """`/metrics` is a plain route (`Instrumentator.expose`), not a mounted
+    ASGI sub-app: a slash-less `GET /metrics` -- what Prometheus and `curl`
+    without `-L` both send -- must answer 200 directly, never 307 to
+    `/metrics/`. The `client` fixture deliberately does not follow
+    redirects."""
+    resp = await client.get("/metrics")
+
+    assert resp.status_code == 200
+    assert resp.history == []
+    assert "t2s_" in resp.text
+
+
+async def test_metrics_endpoint_is_404_when_metrics_are_disabled(settings: Settings) -> None:
+    """`METRICS_ENABLED=false` skips instrumentation *and* the endpoint."""
+    off = settings.model_copy(update={"metrics_enabled": False})
+    app = create_app(settings=off, llm=FakeLLM([GOOD_RESPONSE]))
+
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            query_resp = await ac.post(
+                "/api/v1/query", json={"question": "How many orders are there?"}
+            )
+            metrics_resp = await ac.get("/metrics")
+
+    # The app is otherwise fully functional -- only the metrics are gone.
+    assert query_resp.status_code == 200
+    assert query_resp.json()["error"] is None
+    assert metrics_resp.status_code == 404

@@ -384,3 +384,73 @@ async def test_observer_sees_cache_and_execution_hooks_on_happy_path(settings: S
     assert execution_events == [{"outcome": "success"}]
 
     assert events[-1] == ("pipeline_done", {"ok": True})
+
+
+async def test_cache_disabled_reports_disabled_and_records_no_sql_cache_metric(
+    settings: Settings,
+) -> None:
+    """`CACHE_ENABLED=false` must be visible as `cache_status="disabled"`,
+    not silently degrade into a permanent stream of misses: with the cache
+    off, `build_pipeline` hands the pipeline `cache=None`, so no `cache="sql"`
+    read is ever attempted or counted."""
+    off = settings.model_copy(update={"cache_enabled": False})
+    llm = FakeLLM([GOOD_RESPONSE, OTHER_RESPONSE])
+    app = create_app(settings=off, llm=llm)
+
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            body = {"question": "How many orders are there?"}
+            first = await client.post("/api/v1/query", json=body)
+            second = await client.post("/api/v1/query", json=body)
+            metrics = await client.get("/metrics")
+
+    assert first.status_code == 200
+    assert first.json()["cache_status"] == "disabled"
+    assert first.json()["error"] is None
+    # The same question twice still costs two LLM calls -- nothing is cached.
+    assert second.json()["cache_status"] == "disabled"
+    assert len(llm.calls) == 2
+
+    assert metrics.status_code == 200
+    sql_samples = [
+        line
+        for line in metrics.text.splitlines()
+        if line.startswith("t2s_cache_requests_total") and 'cache="sql"' in line
+    ]
+    assert sql_samples == []
+
+
+async def test_oversized_result_is_not_stored_and_next_ask_is_a_sql_hit(
+    settings: Settings, redis_url: str
+) -> None:
+    """`QueryCache.set_result` skips a serialised entry larger than
+    `RESULT_CACHE_MAX_BYTES` entirely, so one huge row set can't crowd
+    everything else out of Redis. The SQL tier is unaffected: the next
+    identical question is a `sql_hit`, not a `result_hit`."""
+    tiny = settings.model_copy(update={"result_cache_max_bytes": 64})
+    llm = FakeLLM([GOOD_RESPONSE])
+    app = create_app(settings=tiny, llm=llm)
+    question = "How many orders are there?"
+    body = {"question": question, "use_result_cache": True}
+
+    async with LifespanManager(app):
+        key = app.state.query_cache.key_for(question)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            first = await client.post("/api/v1/query", json=body)
+            second = await client.post("/api/v1/query", json=body)
+
+    assert first.json()["cache_status"] == "miss"
+    assert first.json()["error"] is None
+    assert second.json()["cache_status"] == "sql_hit"
+    assert second.json()["rows"] == first.json()["rows"]
+    assert len(llm.calls) == 1
+
+    checker = RedisCache(redis_url)
+    try:
+        # The SQL tier was written; the result tier was skipped.
+        assert await checker.get_json(key) is not None
+        assert await checker.get_json(result_cache_key(sql_key=key)) is None
+    finally:
+        await checker.aclose()
