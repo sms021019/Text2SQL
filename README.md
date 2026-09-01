@@ -27,6 +27,13 @@ flowchart TD
     API --> LLM["LLM provider\n(Ollama or OpenAI-compatible)"]
     Retriever -. embed .-> LLM
     API -. generate/repair .-> LLM
+
+    API <--> Redis[("Redis\nSQL / result / schema cache\n+ arq job queue")]
+    Redis -. dequeue .-> Worker["arq worker\n(same pipeline, same caches)"]
+    Worker --> Retriever
+
+    Prometheus["Prometheus"] -. scrape /metrics .-> API
+    Grafana["Grafana"] --> Prometheus
 ```
 
 Two Postgres roles behind two logical databases: `app_db` (read/write) holds
@@ -34,6 +41,12 @@ the app's own state — right now just the `query_log` table — and `target_db`
 (the seeded NorthwindNext e-commerce data) is reached only through a
 `readonly` role. The LLM provider is out-of-process and swappable; nothing
 in `app/core` talks to it directly except through the `LLMClient` protocol.
+
+Redis carries three caches and the job queue. The `worker` container runs
+the identical pipeline the API does — same builder, same caches, same schema
+version — so a background job answers exactly as the synchronous route
+would. Prometheus scrapes the API's `/metrics` every 5 s and Grafana serves
+a provisioned dashboard on top of it.
 
 ## Quickstart
 
@@ -45,11 +58,21 @@ make up
 ```
 
 Open http://localhost:5173, type a question, see the generated SQL and the
-result table.
+result table. The stack also publishes:
 
-`make up` starts Postgres (seeded on first boot), the backend, and the
-frontend — but *not* an LLM, so `/api/v1/query` will fail with an `llm:`
-error until you point `LLM_PROVIDER` at something reachable. Two options:
+| URL | What |
+|---|---|
+| http://localhost:5173 | Frontend |
+| http://localhost:8000/docs | API (OpenAPI UI); metrics at `/metrics/` |
+| http://localhost:9090 | Prometheus |
+| http://localhost:3000 | Grafana → *Text2SQL overview* (anonymous viewer; `admin`/`admin` to edit) |
+
+Every port is bound to `127.0.0.1` — nothing is reachable from the network.
+
+`make up` starts Postgres (seeded on first boot), Redis, the backend, the
+arq worker, the frontend, Prometheus, and Grafana — but *not* an LLM, so
+`/api/v1/query` will fail with an `llm:` error until you point
+`LLM_PROVIDER` at something reachable. Two options:
 
 * **Local model:** `make up-ollama` instead of `make up`. This also starts
   an `ollama` service and pulls `qwen2.5-coder:7b` (generation) plus
@@ -83,6 +106,59 @@ error until you point `LLM_PROVIDER` at something reachable. Two options:
 
 Every run — success or failure — is logged to `query_log` in `app_db` with
 the question, SQL, timing per stage, token usage, and whether a repair fired.
+
+## Caching
+
+Two Redis tiers sit in front of that flow, keyed by
+`sha256(schema_version | model | prompt_version | normalised question)` — so
+a schema refresh, a model swap, or a prompt change produces misses on its
+own, with no invalidation to orchestrate:
+
+* **SQL tier** (24 h, on by default) — a hit skips retrieve/generate but
+  still re-guards and re-executes the statement, so the rows are always
+  fresh.
+* **Result tier** (5 min, opt-in per request with `"use_result_cache":
+  true`) — a hit skips the database too.
+
+A third tier stores the introspected schema graph and its embeddings
+matrix, so a restart doesn't re-embed every table through the LLM. Every
+response reports `cache_status` (`miss`, `sql_hit`, `result_hit`, `bypass`,
+`disabled`) and the UI shows it as a badge; `"use_cache": false` bypasses
+both query tiers. With Redis down every read is a miss and the API keeps
+answering. See [ADR 0003](docs/decisions/0003-cache-design.md).
+
+## Background jobs
+
+`POST /api/v1/query/async` takes the same body as `POST /api/v1/query`,
+returns `202 {job_id, status}`, and `GET /api/v1/jobs/{job_id}` polls for
+the same `QueryResponse` under `result`. The work runs in the `worker`
+container (arq on Redis), built from the same `build_components()` the API
+uses, so the two cannot drift. A pipeline error (guard rejection, failed
+statement, LLM outage) completes the job with the message in
+`result.error`; `status="failed"` means the task itself raised. If Redis is
+unreachable, both async routes answer 503 and the synchronous path keeps
+working. See [ADR 0004](docs/decisions/0004-async-jobs.md).
+
+## Metrics and dashboards
+
+The pipeline reports every event (stage timing, LLM usage, guard rejection,
+execution outcome, cache read) to a `PipelineObserver` protocol defined in
+`app/core` — which knows nothing about Prometheus. The app layer's
+`MetricsObserver` turns those into `t2s_*` collectors, exposed at
+`/metrics/` alongside `prometheus-fastapi-instrumentator`'s `http_*` ones:
+
+```bash
+curl -s http://localhost:8000/metrics/ | grep t2s_
+```
+
+`prometheus` scrapes that every 5 s; `grafana` provisions its datasource
+and the *Text2SQL overview* dashboard from
+[`deploy/grafana/`](deploy/grafana/) — LLM p50/p95 by stage, SQL success
+rate, cache hit rate per tier, tokens per minute and estimated cost, queue
+depth, HTTP p95, and guard rejections by reason. Labels are kept to a fixed
+low-cardinality set (never question text, request id, or SQL — those go to
+the structured logs). See
+[ADR 0005](docs/decisions/0005-observability.md).
 
 ## SQL safety
 
@@ -176,18 +252,53 @@ validate `questions.yaml` and print the question list without calling the
 API, and `--api-url`/`--questions`/`--out` to point at something other than
 the defaults.
 
+## Load testing
+
+```bash
+make load-test
+```
+
+Runs [`scripts/load_test.js`](scripts/load_test.js) in the `grafana/k6`
+container: 5 virtual users for 60 seconds against `POST /api/v1/query`,
+walking ten questions copied from `seed/questions.yaml` and flipping
+`use_cache` on and off every other iteration so the cache panels have both
+hits and bypasses to plot. Watch the Grafana dashboard while it runs.
+
+The k6 container reaches the API over `--network host`, which resolves
+`127.0.0.1:8000` on Linux but not on Docker Desktop for macOS/Windows —
+there, override the URL:
+
+```bash
+API_URL=http://host.docker.internal:8000 make load-test
+```
+
+With no LLM reachable the run still exercises the HTTP, schema-retrieval,
+cache-miss and error paths (every request answers 200 with an `llm:` error
+in the body), so the latency, cache and success-rate panels move; only the
+token, cost and cache-*hit* series stay empty.
+
 ## Roadmap
 
-This is Phase 1 of a four-phase plan — see [`PLAN.md`](PLAN.md) for the full
+This is Phase 2 of a four-phase plan — see [`PLAN.md`](PLAN.md) for the full
 detail and the design-decision writeups (§4) that the ADRs in
 [`docs/decisions/`](docs/decisions/) are drawn from:
 
-* **Phase 1 (this tag, `v0.1`)** — core NL→SQL API, local `docker compose up`.
-* **Phase 2 (`v0.2`)** — Redis result/schema caching, an async job queue,
-  Prometheus + Grafana observability.
+* **Phase 1 (`v0.1`)** — core NL→SQL API, local `docker compose up`.
+* **Phase 2 (this tag, `v0.2`)** — Redis two-tier query cache plus a schema
+  cache, an arq job queue with async query endpoints, Prometheus metrics, a
+  provisioned Grafana dashboard, and a k6 load test.
 * **Phase 3 (`v0.3`)** — CI on every PR, multi-arch image releases to GHCR.
 * **Phase 4 (`v1.0`)** — Kubernetes (k3d locally, Terraform-provisioned EKS
   in the cloud).
+
+Known gaps carried out of Phase 2, both deliberate:
+
+* `query_log` has no `cache_status` column, so the per-request cache outcome
+  is visible in the API response and in Prometheus but not queryable
+  historically out of `app_db`.
+* A schema refresh applies to one process only — `POST /schema/refresh` for
+  the API, `refresh_schema_job` for the worker. There is no cross-process
+  invalidation yet.
 
 ## Project layout
 
@@ -196,7 +307,8 @@ Text2SQL/
 ├── backend/     # FastAPI app: core pipeline, LLM clients, API routes, tests
 ├── frontend/    # Vite + React + TS single-page UI
 ├── seed/        # NorthwindNext schema, generator, seed init container, eval questions
-├── scripts/     # eval.py (and, from Phase 2, load_test.js)
+├── scripts/     # eval.py, load_test.js (k6)
+├── deploy/      # prometheus.yml, Grafana datasource/dashboard provisioning
 ├── docs/        # architecture.md, demo.md, ADRs
 ├── docker-compose.yml
 ├── .env.example
