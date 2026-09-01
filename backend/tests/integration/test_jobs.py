@@ -274,6 +274,27 @@ async def test_refresh_schema_job_runs_on_the_worker(settings: Settings) -> None
     assert info.result["version"]
 
 
+async def test_get_job_on_a_schema_refresh_job_reports_complete_without_a_result(
+    settings: Settings,
+) -> None:
+    async with _api(settings, FakeLLM([])) as client:
+        pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+        try:
+            job = await pool.enqueue_job("refresh_schema_job")
+            assert job is not None
+        finally:
+            await pool.aclose()
+        await _drain_queue(settings, FakeLLM([]))
+        done = await client.get(f"/api/v1/jobs/{job.job_id}")
+    assert done.status_code == 200
+    assert done.json() == {
+        "job_id": job.job_id,
+        "status": "complete",
+        "result": None,
+        "error": None,
+    }
+
+
 async def test_enqueue_returns_503_when_redis_is_unreachable_but_sync_query_still_works(
     settings: Settings,
 ) -> None:
