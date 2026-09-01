@@ -32,9 +32,14 @@ from app.llm.base import Usage
 
 __all__ = ["CompositeObserver", "Metrics", "MetricsObserver", "set_schema_version"]
 
-#: Buckets for `t2s_llm_request_duration_seconds`, per the Task 4 brief --
-#: wide because LLM completions routinely run seconds, not milliseconds.
-_LLM_DURATION_BUCKETS = (0.25, 0.5, 1, 2, 4, 8, 16, 30, 60)
+#: Buckets for `t2s_llm_request_duration_seconds`. Wide at the top because
+#: LLM completions routinely run seconds, not milliseconds (the Task 4
+#: brief's original 0.25 s -> 60 s range); extended downwards to 10 ms for
+#: `stage="embed"`, whose calls are single- to low-double-digit
+#: milliseconds. Without the low end every embed observation would fall in
+#: the first bucket and `histogram_quantile` would interpolate the same
+#: constant no matter how slow (or fast) embedding actually got.
+_LLM_DURATION_BUCKETS = (0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 30, 60)
 
 
 class Metrics:

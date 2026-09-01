@@ -73,12 +73,19 @@ async def _clean_query_cache(redis_url: str) -> AsyncIterator[None]:
     # target DB (so `graph.version` -- baked into every cache key -- is
     # stable across tests) -- without this, an earlier test's stored keys
     # would look like a hit to a later one.
+    #
+    # `schema:` is cleared too, so every app built here does a real index
+    # build at startup. That makes
+    # `test_observer_sees_cache_and_execution_hooks_on_happy_path` an
+    # unconditional guard on the two-observer split: with a warm schema
+    # cache there is no build at all, and an injected observer wrongly
+    # receiving the build's `embed` event would go unnoticed.
     cleaner = RedisCache(redis_url)
-    await cleaner.delete_prefix("sql:")
-    await cleaner.delete_prefix("res:")
+    for prefix in ("sql:", "res:", "schema:"):
+        await cleaner.delete_prefix(prefix)
     yield
-    await cleaner.delete_prefix("sql:")
-    await cleaner.delete_prefix("res:")
+    for prefix in ("sql:", "res:", "schema:"):
+        await cleaner.delete_prefix(prefix)
     await cleaner.aclose()
 
 

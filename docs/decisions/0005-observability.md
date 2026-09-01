@@ -46,7 +46,9 @@ exposed: a dashboard someone can look at while a load test runs.
 
 4. **The metric set** (names fixed, all `t2s_`-prefixed):
    `t2s_llm_request_duration_seconds{provider,model,stage}` (buckets
-   0.25 s → 60 s, wide because completions take seconds),
+   10 ms → 60 s: wide at the top because completions take seconds, and
+   down to 10 ms because `stage="embed"` calls take milliseconds and would
+   otherwise all pile into the first bucket),
    `t2s_llm_tokens_total{provider,model,direction}`,
    `t2s_llm_cost_usd_total{provider,model}`,
    `t2s_sql_guard_rejections_total{reason}`,
