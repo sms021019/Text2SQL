@@ -33,6 +33,7 @@ flowchart TD
     Worker --> Retriever
 
     Prometheus["Prometheus"] -. scrape /metrics .-> API
+    Prometheus -. scrape :9100/metrics .-> Worker
     Grafana["Grafana"] --> Prometheus
 ```
 
@@ -45,8 +46,9 @@ in `app/core` talks to it directly except through the `LLMClient` protocol.
 Redis carries three caches and the job queue. The `worker` container runs
 the identical pipeline the API does — same builder, same caches, same schema
 version — so a background job answers exactly as the synchronous route
-would. Prometheus scrapes the API's `/metrics` every 5 s and Grafana serves
-a provisioned dashboard on top of it.
+would, and reports the same metrics from its own `:9100/metrics`.
+Prometheus scrapes both every 5 s and Grafana serves a provisioned
+dashboard on top of it.
 
 ## Quickstart
 
@@ -64,6 +66,7 @@ result table. The stack also publishes:
 |---|---|
 | http://localhost:5173 | Frontend |
 | http://localhost:8000/docs | API (OpenAPI UI); metrics at `/metrics` |
+| http://localhost:9100/metrics | arq worker metrics (no UI — it serves nothing else) |
 | http://localhost:9090 | Prometheus |
 | http://localhost:3000 | Grafana → *Text2SQL overview* (anonymous viewer; `admin`/`admin` to edit) |
 
@@ -155,7 +158,22 @@ LLM calls are labelled by stage — `generate`, `repair`, and `embed` (the
 schema retriever's question and index embeddings) — with tokens and
 estimated cost per model.
 
-`prometheus` scrapes that every 5 s; `grafana` provisions its datasource
+The arq worker runs the same pipeline, so it records the same `t2s_*`
+collectors. Having no ASGI app to hang a route off, it serves them from a
+WSGI daemon thread (`app/observability/exporter.py`) on
+`WORKER_METRICS_PORT` — `9100` by default, `0` to disable, published on
+localhost by compose:
+
+```bash
+curl -s http://localhost:9100/metrics | grep t2s_
+```
+
+That endpoint doubles as the `worker` container's healthcheck, since it
+only answers once the worker has finished building its components.
+Prometheus scrapes it as a second job, so the two processes' series are
+distinguished by `job="text2sql-backend"` / `job="text2sql-worker"`.
+
+`prometheus` scrapes both every 5 s; `grafana` provisions its datasource
 and the *Text2SQL overview* dashboard from
 [`deploy/grafana/`](deploy/grafana/) — LLM p50/p95 by stage, SQL success
 rate, cache hit rate per tier, tokens per minute and estimated cost, queue

@@ -41,7 +41,8 @@ running the identical pipeline:
    and the same schema version as the synchronous route — there is no
    second, drifting copy of the wiring. The worker deliberately does *not*
    migrate the app database: the API process owns that, so the two never
-   race Alembic.
+   race Alembic — and compose starts the worker only once `backend` is
+   healthy, so the migration is finished before the first job can write.
 5. **Polling, not SSE/WebSocket.** Polling works through any ingress and
    any proxy, needs no connection state, and is three lines in the
    frontend. Streaming is a stretch goal, not a Phase 2 requirement.
@@ -92,11 +93,15 @@ running the identical pipeline:
   change both must be refreshed (or restarted) to agree on a schema
   version. Cross-process invalidation — a pub/sub notification, or a
   version check on each request — is a deliberate follow-up.
-- The worker exposes no HTTP endpoint, so **its metrics are not scraped**:
-  Prometheus sees the API process only. Job-level observability comes from
-  the worker's structured logs. The worker still builds a `MetricsObserver`
-  (it comes free with `build_components`), purely to keep its wiring
-  identical to the API's — see ADR 0005.
+- **The worker's metrics are scraped.** It builds a `MetricsObserver` for
+  free with `build_components`, and `on_startup` serves that registry on
+  `WORKER_METRICS_PORT` (default `9100`) from a WSGI daemon thread
+  (`app/observability/exporter.py`), scraped as the `text2sql-worker` job.
+  Its series carry Prometheus's `job="text2sql-worker"` label, so the
+  dashboard's `sum(...)` panels aggregate both processes and a per-process
+  view is a `by (job)` away — see ADR 0005. `t2s_jobs_queue_depth` stays
+  API-side: it samples the queue, not the work, so one sampler is right.
+  The structured logs remain the per-job record.
 - Two processes now build the same runtime at startup, which doubles
   connections to Postgres, Redis, and the LLM at boot. That is the price of
   running the identical code in both, and it is the right trade at this

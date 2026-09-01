@@ -421,7 +421,7 @@
       "id": 8,
       "type": "timeseries",
       "title": "Background job queue depth",
-      "description": "t2s_jobs_queue_depth -- ZCARD of the arq queue, sampled by the API process every QUEUE_DEPTH_SAMPLE_S seconds (default 5).",
+      "description": "t2s_jobs_queue_depth -- ZCARD of the arq queue, sampled by the API process every QUEUE_DEPTH_SAMPLE_S seconds (default 5). Pinned to job=\"text2sql-backend\": the worker exports the same collector but never sets it, so an unfiltered query would draw a second line flat at 0.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -466,7 +466,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "t2s_jobs_queue_depth",
+          "expr": "t2s_jobs_queue_depth{job=\"text2sql-backend\"}",
           "legendFormat": "queued jobs"
         }
       ]

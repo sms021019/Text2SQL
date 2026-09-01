@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     #: arq queue depth (`ZCARD arq:queue`) into `t2s_jobs_queue_depth` -- see
     #: `app.main`'s queue-depth loop.
     queue_depth_sample_s: float = 5.0
+    #: Port the arq worker serves its own Prometheus registry on (see
+    #: `app.observability.exporter` and `app.jobs.worker`); scraped as the
+    #: `text2sql-worker` job in `deploy/prometheus/prometheus.yml`. `0`
+    #: disables the worker exporter. Ignored when `metrics_enabled` is
+    #: false, and ignored entirely in the API process, which serves its
+    #: registry from `GET /metrics` instead.
+    worker_metrics_port: int = 9100
 
     log_level: str = "INFO"
     #: Path to the few-shot examples YAML, relative to the CWD the app is

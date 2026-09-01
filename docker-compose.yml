@@ -43,25 +43,47 @@ services:
 
   worker:
     # Same image as `backend`, with the uvicorn CMD replaced by the arq
-    # worker. No ports: it only talks to postgres and redis.
+    # worker. It serves no API, but it does serve its own Prometheus
+    # registry on 9100 (app/observability/exporter.py) -- published on
+    # 127.0.0.1 for `curl`-ing by hand; Prometheus scrapes `worker:9100`
+    # over the compose network.
     build:
       context: .
       dockerfile: backend/Dockerfile
     command: ["arq", "app.jobs.worker.WorkerSettings"]
-    # The image's HEALTHCHECK curls the API's /healthz, which this container
-    # does not serve -- it would report permanently unhealthy otherwise.
+    # Replaces the image's HEALTHCHECK, which curls the API's /healthz --
+    # a route this container does not serve. The metrics endpoint is the
+    # worker's equivalent liveness signal: it only answers once
+    # `on_startup` has finished building the components. (Setting
+    # METRICS_ENABLED=false in .env therefore leaves this container
+    # permanently `unhealthy` -- it still processes jobs, and nothing here
+    # gates on `worker` being healthy, but expect the red status.)
     healthcheck:
-      disable: true
+      test: ["CMD", "curl", "-fsS", "http://localhost:9100/metrics"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
     env_file: .env
     environment:
       APP_DB_URL: postgresql+asyncpg://app:app@postgres:5432/app
       TARGET_DB_URL: postgresql+asyncpg://readonly:readonly@postgres:5432/target
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434}
       REDIS_URL: redis://redis:6379/0
+      WORKER_METRICS_PORT: "9100"
+    ports:
+      - "127.0.0.1:9100:9100"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      # Not just ordering: `backend`'s lifespan owns the Alembic migration
+      # of the app database, so waiting for it to report healthy is what
+      # keeps the first job from writing `query_log` before the table
+      # exists.
+      backend:
         condition: service_healthy
 
   frontend:

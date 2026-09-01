@@ -113,8 +113,15 @@ those into `t2s_*` collectors on a per-app `CollectorRegistry`, served at
 `GET /metrics` and scraped by Prometheus into the Grafana dashboard under
 `deploy/`. The core never learns that Prometheus exists.
 
+Both processes report. The API's registry rides its ASGI app; the worker has
+none, so `app/observability/exporter.py` puts its registry on a WSGI daemon
+thread at `:$WORKER_METRICS_PORT/metrics` (default `9100`), scraped as a
+second Prometheus job. Same metric names, told apart by the `job` label.
+
 ```
-pipeline → PipelineObserver → MetricsObserver → /metrics → Prometheus → Grafana
+API:    pipeline → PipelineObserver → MetricsObserver → GET /metrics   ┐
+                                                                       ├→ Prometheus → Grafana
+worker: pipeline → PipelineObserver → MetricsObserver → :9100/metrics  ┘
 ```
 
 ## Components

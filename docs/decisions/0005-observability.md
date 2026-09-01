@@ -98,10 +98,12 @@ exposed: a dashboard someone can look at while a load test runs.
   single-service pipeline the span tree would mostly restate the stage
   timings already in the logs, at the cost of a collector in the stack.
 - **Push-based metrics (Pushgateway/StatsD).** Would let the arq worker
-  report too, without an HTTP endpoint. Rejected for now: pull is the
+  report too, without an HTTP endpoint. Rejected: pull is the
   Kubernetes-native model and the Pushgateway's stale-metric semantics are
   a known footgun. Scraping the worker properly means giving it a small
-  metrics endpoint — a follow-up if job-level metrics start to matter.
+  metrics endpoint — done, in `app/observability/exporter.py`: the worker's
+  `on_startup` serves its registry on `WORKER_METRICS_PORT` from a WSGI
+  daemon thread, scraped as the `text2sql-worker` job.
 - **Deriving dashboards from `query_log` in Postgres.** Already possible for
   after-the-fact analysis and used by `scripts/eval.py`, but it is a
   reporting database, not a time-series one; percentiles and rates over it
@@ -140,9 +142,14 @@ exposed: a dashboard someone can look at while a load test runs.
   `PipelineOutput.usage` or `query_log.prompt_tokens`, which stay a record
   of what the *completion* calls cost — otherwise a per-request token count
   would silently mix two different models' tokenizers.
-- The arq worker's metrics are recorded into a registry nothing scrapes
-  (see ADR 0004). Job-level numbers come from its logs until it gets an
-  endpoint of its own.
+- **The same `t2s_*` names now come from two processes.** Prometheus tells
+  them apart by the `job` label (`text2sql-backend`, `text2sql-worker`), so
+  every dashboard panel is either an aggregate across both
+  (`sum by (model) (t2s_llm_cost_usd_total)`) or an explicit `by (job)`
+  split. The one exception is pinned: `t2s_jobs_queue_depth` is queried
+  `{job="text2sql-backend"}`, because the worker exports the collector but
+  never `.set()`s it — the API owns the sampler — and an unfiltered query
+  would draw a second line flat at `0`.
 - Cost figures are estimates and drift with vendor pricing; the table is
   config, not code, so correcting it is an env var away — but nothing
   validates it against a bill.
