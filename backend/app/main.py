@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 
@@ -45,7 +45,7 @@ from app.observability.logging import configure_logging
 from app.observability.metrics import Metrics
 from app.observability.middleware import RequestIDMiddleware
 from app.services.bootstrap import build_components, close_components, publish_components
-from app.services.schema_sync import watch_schema_epoch
+from app.services.schema_sync import log_task_exit, watch_schema_epoch
 
 __all__ = ["app", "create_app"]
 
@@ -87,24 +87,6 @@ async def _sample_queue_depth(pool: ArqRedis, metrics: Metrics, period_s: float)
         else:
             metrics.jobs_queue_depth.set(depth)
         await asyncio.sleep(period_s)
-
-
-def _log_task_exit(name: str) -> Callable[[asyncio.Task[None]], None]:
-    """A done-callback that warns if one of the lifespan's endless background
-    loops died on its own.
-
-    Both the queue-depth sampler and the schema-epoch watcher are meant to
-    run until the lifespan cancels them, so any other exit is silent
-    breakage -- a frozen `t2s_jobs_queue_depth`, or an app that quietly
-    stops noticing other processes' schema refreshes -- with nothing in the
-    log to say why.
-    """
-
-    def log_exit(task: asyncio.Task[None]) -> None:
-        if not task.cancelled() and task.exception() is not None:
-            logger.warning("%s stopped", name, exc_info=task.exception())
-
-    return log_exit
 
 
 def create_app(
@@ -151,7 +133,7 @@ def create_app(
             sampler = asyncio.create_task(
                 _sample_queue_depth(arq_pool, metrics, resolved_settings.queue_depth_sample_s)
             )
-            sampler.add_done_callback(_log_task_exit("queue depth sampler"))
+            sampler.add_done_callback(log_task_exit("queue depth sampler"))
 
         # Re-publishing on refresh is what makes the watcher visible to the
         # handlers: they read the `app.state` mirror, not `components`.
@@ -164,7 +146,7 @@ def create_app(
                     on_refreshed=lambda: publish_components(app.state, components),
                 )
             )
-            watcher.add_done_callback(_log_task_exit("schema epoch watcher"))
+            watcher.add_done_callback(log_task_exit("schema epoch watcher"))
 
         app.state.ready = True
 

@@ -123,6 +123,44 @@ async def test_startup_serves_the_components_registry_and_shutdown_stops_it(
             await client.get(url, timeout=1)
 
 
+async def test_startup_attaches_an_exit_log_to_the_watcher(
+    worker_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker's watcher carries the same `log_task_exit` done-callback
+    `app.main`'s lifespan attaches to its copy of the loop: without it, a
+    watcher that died on its own would pin this worker to a stale schema
+    with nothing in the log to say why."""
+    monkeypatch.setattr(
+        worker_module,
+        "_settings",
+        Settings(
+            _env_file=None,
+            metrics_enabled=False,
+            worker_metrics_port=0,
+            schema_sync_poll_s=0.05,
+        ),
+    )
+    named: list[str] = []
+    fired: list[Any] = []
+
+    def fake_log_task_exit(name: str) -> Any:
+        named.append(name)
+        return fired.append
+
+    monkeypatch.setattr(worker_module, "log_task_exit", fake_log_task_exit)
+
+    ctx: dict[Any, Any] = {}
+    await worker_module.startup(ctx)
+    watch = ctx["schema_watch"]
+    assert named == ["schema epoch watcher"]
+
+    await worker_module.shutdown(ctx)
+    # Done-callbacks are scheduled with `call_soon`, so they land on the
+    # loop pass after the task finishes -- not inside `shutdown`'s `await`.
+    await asyncio.sleep(0)
+    assert fired == [watch]
+
+
 @pytest.mark.parametrize(
     ("metrics_enabled", "worker_metrics_port"),
     [(True, 0), (False, 9100)],

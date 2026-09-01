@@ -21,7 +21,7 @@ from collections.abc import Callable
 
 from app.services.bootstrap import AppComponents, refresh_components
 
-__all__ = ["mark_refreshed", "sync_schema_if_stale", "watch_schema_epoch"]
+__all__ = ["log_task_exit", "mark_refreshed", "sync_schema_if_stale", "watch_schema_epoch"]
 
 logger = logging.getLogger(__name__)
 
@@ -80,3 +80,24 @@ async def watch_schema_epoch(
         if await sync_schema_if_stale(components) and on_refreshed is not None:
             on_refreshed()
         await asyncio.sleep(period_s)
+
+
+def log_task_exit(name: str) -> Callable[[asyncio.Task[None]], None]:
+    """A done-callback that warns if one of the endless background loops
+    died on its own.
+
+    `watch_schema_epoch` is meant to run until its owner (`app.main`'s
+    lifespan, `app.jobs.worker`'s startup) cancels it, so any other exit is
+    silent breakage -- a process that quietly stops noticing other
+    processes' schema refreshes -- with nothing in the log to say why. It
+    lives here, next to the loop it mainly guards, so that both entry points
+    can attach it without the worker importing `app.main`; the lifespan's
+    queue-depth sampler (a frozen `t2s_jobs_queue_depth` when it dies) uses
+    it too.
+    """
+
+    def log_exit(task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("%s stopped", name, exc_info=task.exception())
+
+    return log_exit

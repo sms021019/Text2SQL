@@ -372,7 +372,7 @@
       "id": 7,
       "type": "stat",
       "title": "Estimated LLM cost (USD, cumulative)",
-      "description": "t2s_llm_cost_usd_total since the backend process started, by model. Priced from Settings.llm_prices_usd_per_1k; a model absent from that table -- every local Ollama model -- costs 0.",
+      "description": "t2s_llm_cost_usd_total summed over the scraped processes (backend + worker), by model. Each process counts from its own start, so this total drops whenever either one restarts -- read it as \"spend since the last deploy\", not as a lifetime bill. Priced from Settings.llm_prices_usd_per_1k; a model absent from that table -- every local Ollama model -- costs 0.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

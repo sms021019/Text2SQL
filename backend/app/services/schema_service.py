@@ -79,8 +79,10 @@ async def prepare_retriever(
     dedicated metrics-only observer here (`app.services.bootstrap`'s
     `schema_observer`), not the per-request pipeline observer a test might
     inject, since this runs once at startup/refresh rather than per query.
-    That same `observer` also gets this call's `on_llm(stage="embed", ...)`
-    event, for the same reason -- passed to `build_index()` explicitly.
+    On a cache *miss* that same `observer` additionally gets the index
+    build's `on_llm(stage="embed", ...)` event, for the same reason --
+    passed to `build_index()` explicitly; a hit calls the LLM not at all,
+    so it reports nothing beyond the one `on_cache`.
 
     `llm_observer` is the observer the returned retriever keeps for the rest
     of its life: every *request-time* question embedding is reported there,

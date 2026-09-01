@@ -50,7 +50,7 @@ from app.jobs.tasks import refresh_schema_job, run_query_job
 from app.observability.exporter import start_metrics_server
 from app.observability.logging import configure_logging
 from app.services.bootstrap import build_components, close_components
-from app.services.schema_sync import watch_schema_epoch
+from app.services.schema_sync import log_task_exit, watch_schema_epoch
 
 __all__ = ["WorkerSettings"]
 
@@ -66,9 +66,14 @@ async def startup(ctx: dict[Any, Any]) -> None:
             components.metrics.registry, port=_settings.worker_metrics_port
         )
     if _settings.schema_sync_poll_s > 0:
-        ctx["schema_watch"] = asyncio.create_task(
+        watch = asyncio.create_task(
             watch_schema_epoch(components, period_s=_settings.schema_sync_poll_s)
         )
+        # Same guard `app.main`'s lifespan puts on its copy of this loop: a
+        # watcher that dies on its own leaves the worker silently pinned to
+        # a stale schema, and nothing else would say so.
+        watch.add_done_callback(log_task_exit("schema epoch watcher"))
+        ctx["schema_watch"] = watch
 
 
 async def shutdown(ctx: dict[Any, Any]) -> None:
