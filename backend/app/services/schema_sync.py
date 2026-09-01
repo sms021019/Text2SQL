@@ -44,12 +44,18 @@ async def sync_schema_if_stale(components: AppComponents) -> bool:
     Never raises for Redis trouble (`get_epoch` answers `None`, which reads
     as "nothing to do"), and a refresh that blows up leaves the current
     schema serving and the epoch unadopted, so the next tick retries.
+
+    `invalidate=False`: the process that bumped the epoch stored its fresh
+    `schema:{version}:*` index *before* the bump made it visible, so we load
+    that index instead of deleting it and re-embedding the same summaries --
+    one build plus N-1 cache hits per refresh, not N builds. See
+    `refresh_components`' docstring for the full reasoning.
     """
     epoch = await components.schema_cache.get_epoch()
     if epoch is None or epoch == components.schema_epoch:
         return False
     try:
-        graph = await refresh_components(components)
+        graph = await refresh_components(components, invalidate=False)
     except Exception:
         logger.exception("schema sync: refresh failed, keeping current schema")
         return False

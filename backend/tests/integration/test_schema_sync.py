@@ -57,8 +57,9 @@ async def _clean_schema_keys(redis_url: str) -> AsyncIterator[None]:
 
 
 async def test_refresh_in_one_runtime_propagates_to_another(settings: Settings) -> None:
+    b_llm = FakeLLM()
     a = await build_components(settings, llm=FakeLLM())
-    b = await build_components(settings, llm=FakeLLM())
+    b = await build_components(settings, llm=b_llm)
     try:
         old_graph_b = b.graph
         assert await sync_schema_if_stale(b) is False  # nothing happened yet
@@ -66,8 +67,17 @@ async def test_refresh_in_one_runtime_propagates_to_another(settings: Settings) 
         await refresh_components(a)
         await mark_refreshed(a)
         assert a.schema_epoch is not None
+        assert a.schema_index_source == "embedded"  # the refresher rebuilds the index
 
+        # The follower must adopt the index `a` just stored, not sweep it and
+        # re-embed: a propagated refresh costs one build plus N-1 cache hits,
+        # so `b`'s LLM sees no `embed()` call at all across the sync.
+        embeds_before = len(b_llm.embed_calls)
         assert await sync_schema_if_stale(b) is True
+        assert len(b_llm.embed_calls) == embeds_before
+        assert b.schema_index_source == "cache"
+        assert await b.schema_cache.load(b.graph.version) is not None  # index survived
+
         assert b.schema_epoch == a.schema_epoch
         assert b.graph is not old_graph_b  # rebuilt
         assert await sync_schema_if_stale(b) is False  # idempotent

@@ -97,8 +97,9 @@ class AppComponents:
     #: The observer handed to `Text2SQLPipeline` -- a `MetricsObserver`, an
     #: injected observer, a `CompositeObserver` of both, or a `NullObserver`.
     observer: PipelineObserver
-    #: Metrics-only observer for the one startup/refresh `cache="schema"`
-    #: event -- see `_resolve_observers`.
+    #: Metrics-only observer for what `prepare_retriever` reports at
+    #: startup/refresh: the `cache="schema"` event always, plus the index
+    #: build's `stage="embed"` event on a miss -- see `_resolve_observers`.
     schema_observer: PipelineObserver
     schema_index_source: SchemaIndexSource
     #: The shared `schema:epoch` token this process has already accounted
@@ -257,21 +258,38 @@ async def close_components(components: AppComponents) -> None:
             await aclose()
 
 
-async def refresh_components(components: AppComponents) -> SchemaGraph:
+async def refresh_components(components: AppComponents, *, invalidate: bool = True) -> SchemaGraph:
     """Re-introspect the target database and swap the schema-dependent half
     of `components` (graph, retriever, pipeline, query cache) in place,
     returning the new `SchemaGraph`.
 
-    Shared by `POST /api/v1/schema/refresh` and
-    `app.jobs.tasks.refresh_schema_job` so both refresh paths rebuild the
-    same things in the same order.
+    Two callers, two modes:
+
+    * `invalidate=True` (the default) is the *refresh* path -- `POST
+      /api/v1/schema/refresh` and `app.jobs.tasks.refresh_schema_job`.
+      Dropping the shared cache first is what makes an explicit refresh mean
+      something for an unchanged schema: re-introspection then yields the
+      same `graph.version`, so without the sweep `prepare_retriever` would
+      hit the cache and keep serving the very index the operator asked to
+      rebuild.
+    * `invalidate=False` is the *propagation* path --
+      `app.services.schema_sync.sync_schema_if_stale`. The process that ran
+      the refresh already stored a fresh `schema:{version}:*` index before
+      its `mark_refreshed` made the new epoch visible, so a follower must
+      *load* that index rather than delete it. Invalidating here would cost
+      a full re-embed in every follower instead of one build plus N-1 cache
+      hits, could leave a follower whose LLM is down with a
+      `mark_build_failed` retriever, and would run `invalidate_all`'s epoch
+      read-modify-write concurrently with the next refresher's bump.
+
+    Deliberately lock-free in both modes: two refreshes that overlap each
+    rebuild in full and each swap atomically, so the loser's work is wasted
+    but never half-applied.
     """
     settings = components.settings
 
-    # Invalidate first: a re-introspected graph with the same version (an
-    # unchanged schema) must still rebuild/re-store, not silently keep
-    # serving whatever was cached under that version.
-    await components.schema_cache.invalidate_all()
+    if invalidate:
+        await components.schema_cache.invalidate_all()
 
     graph = await introspect(components.target_engine)
     retriever, schema_index_source = await prepare_retriever(

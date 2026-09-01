@@ -105,9 +105,12 @@ class SchemaCache:
         first, written back after, and left out of the count. The gap in
         between reads as "no epoch yet", which `sync_schema_if_stale`
         treats as a no-op rather than as a change, so a watcher polling
-        mid-sweep cannot be tricked into a spurious refresh; and the only
-        caller (`refresh_components`) bumps the epoch immediately after
-        anyway.
+        mid-sweep cannot be tricked into a spurious refresh; and the callers
+        that do reach here -- the admin-refresh path, `POST
+        /api/v1/schema/refresh` and `refresh_schema_job` -- bump the epoch
+        immediately after anyway. The watcher path never invalidates: it
+        calls `refresh_components(..., invalidate=False)` so that it loads
+        the index the refreshing process just stored.
         """
         epoch = await self.get_epoch()
         deleted = await self._cache.delete_prefix("schema:")
