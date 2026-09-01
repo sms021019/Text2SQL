@@ -109,6 +109,26 @@
   border-color: var(--accent);
 }
 
+.question-form-options {
+  display: flex;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+
+.option-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.option-checkbox input:disabled {
+  cursor: not-allowed;
+}
+
 .submit-button {
   background: var(--accent);
   color: #0b0e14;
@@ -134,6 +154,17 @@
   border-radius: 6px;
   padding: 0.6rem 0.9rem;
   font-size: 0.9rem;
+}
+
+/* Job status pill */
+.job-status {
+  align-self: flex-start;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.3rem 0.8rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
 }
 
 /* SQL panel */
@@ -169,6 +200,11 @@
 
 .badge-table {
   font-family: var(--mono);
+}
+
+.badge-cache {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 .sql-code {
