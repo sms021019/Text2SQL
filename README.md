@@ -297,9 +297,6 @@ detail and the design-decision writeups (§4) that the ADRs in
 
 Known gaps carried out of Phase 2, both deliberate:
 
-* `query_log` has no `cache_status` column, so the per-request cache outcome
-  is visible in the API response and in Prometheus but not queryable
-  historically out of `app_db`.
 * A schema refresh applies to one process only — `POST /schema/refresh` for
   the API, `refresh_schema_job` for the worker. There is no cross-process
   invalidation yet.

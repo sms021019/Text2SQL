@@ -25,6 +25,9 @@ async def record_query(
     `success` is derived from `out.error is None`; `latency_ms` sums every
     stage timing (`out.timings`), i.e. wall time across the whole pipeline
     run rather than just LLM latency (`out.usage.latency_ms`).
+
+    `cache_status` is copied from `out.cache_status` so cache outcomes are
+    queryable historically (ADR 0003).
     """
     row = QueryLog(
         question=question,
@@ -39,6 +42,7 @@ async def record_query(
         model=model,
         schema_version=schema_version,
         request_id=request_id,
+        cache_status=out.cache_status,
     )
     session.add(row)
     await session.flush()
