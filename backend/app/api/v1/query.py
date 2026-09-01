@@ -18,8 +18,9 @@ import logging
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.api.deps import get_pipeline, get_session_factory
+from app.api.deps import get_graph, get_pipeline, get_session_factory
 from app.core.pipeline import Text2SQLPipeline
+from app.core.schema.models import SchemaGraph
 from app.services.query_service import (
     QueryRequest,
     QueryResponse,
@@ -41,8 +42,12 @@ async def run_query(
     body: QueryRequest,
     request: Request,
     pipeline: Text2SQLPipeline = Depends(get_pipeline),
+    graph: SchemaGraph = Depends(get_graph),
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
 ) -> QueryResponse:
+    # `graph` is a dependency rather than a `state.graph` read after the run:
+    # the schema-epoch watcher can swap `app.state` while the pipeline is
+    # awaiting, and this row must record the version the answer came from.
     out = await pipeline.run(
         body.question, use_cache=body.use_cache, use_result_cache=body.use_result_cache
     )
@@ -54,7 +59,7 @@ async def run_query(
         out,
         question=body.question,
         model=out.model or state.settings.llm_model,
-        schema_version=state.graph.version,
+        schema_version=graph.version,
         request_id=request_id,
     )
 

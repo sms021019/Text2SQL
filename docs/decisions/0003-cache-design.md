@@ -116,12 +116,9 @@ again by every replica.
   *response* did not come from the cache — but the two numbers will not
   agree exactly, and that is worth knowing before treating the metric as a
   response-level hit rate.
-- **`query_log` has no `cache_status` column.** The per-request outcome is
-  in the API response and in Prometheus, but it cannot be queried
-  historically out of `app_db` — so "what fraction of last week's questions
-  were cache hits" is not answerable from the database today. Adding the
-  column (plus an Alembic migration) is a deliberate follow-up, not a gap
-  in the cache itself.
+- `query_log.cache_status` (migration 0002) records the per-request outcome,
+  so "what fraction of last week's questions were cache hits" is a `GROUP BY
+  cache_status` away. Rows from before the migration are NULL.
 - Key derivation is baked into `QueryCache` at construction, so a schema
   refresh or model change requires building a new `QueryCache` *and*
   `Text2SQLPipeline` — which is why both are built together in

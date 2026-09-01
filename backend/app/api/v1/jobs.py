@@ -24,6 +24,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from redis.exceptions import RedisError
 
+from app.jobs.tasks import run_query_job
 from app.services.query_service import QueryRequest, QueryResponse
 
 __all__ = ["EnqueueResponse", "JobStatusResponse", "router"]
@@ -56,8 +57,9 @@ class EnqueueResponse(BaseModel):
 class JobStatusResponse(BaseModel):
     job_id: str
     status: JobState
-    #: The finished job's answer -- `None` until it completes, and also for a
-    #: job that failed (the exception is in `error` instead).
+    #: The finished job's answer -- `None` until it completes, for a failed
+    #: job, and for a completed job of a kind that has no `QueryResponse`
+    #: (a schema refresh).
     result: QueryResponse | None = None
     #: Set only when the task function itself raised, i.e. a bug in the
     #: worker. A *pipeline* error (a guard rejection, a failed statement, an
@@ -80,7 +82,7 @@ async def enqueue_query(body: QueryRequest, request: Request) -> EnqueueResponse
 
     try:
         job = await pool.enqueue_job(
-            "run_query_job",
+            run_query_job.__name__,
             body.question,
             use_cache=body.use_cache,
             use_result_cache=body.use_result_cache,
@@ -115,5 +117,10 @@ async def get_job(job_id: str, request: Request) -> JobStatusResponse:
         return JobStatusResponse(job_id=job_id, status="not_found")
     if not info.success:
         return JobStatusResponse(job_id=job_id, status="failed", error=str(info.result))
+
+    if info.function != run_query_job.__name__:
+        # A job that does not produce a QueryResponse (refresh_schema_job):
+        # it finished, there is just nothing to render.
+        return JobStatusResponse(job_id=job_id, status="complete")
 
     return JobStatusResponse(job_id=job_id, status="complete", result=QueryResponse(**info.result))

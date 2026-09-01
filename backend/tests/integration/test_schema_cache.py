@@ -25,19 +25,6 @@ from tests.fakes.llm import FakeLLM
 pytestmark = pytest.mark.integration
 
 
-class CountingLLM(FakeLLM):
-    """`FakeLLM` that additionally counts `embed()` calls, so tests can
-    assert a cache hit skipped the LLM entirely."""
-
-    def __init__(self, responses: list[str] | dict[str, str] | None = None, dim: int = 8) -> None:
-        super().__init__(responses, dim=dim)
-        self.embed_call_count = 0
-
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        self.embed_call_count += 1
-        return await super().embed(texts)
-
-
 @pytest.fixture
 def settings(app_db_url: str, readonly_async_url: str, redis_url: str) -> Settings:
     return Settings(
@@ -65,7 +52,7 @@ async def _clean_schema_cache(redis_url: str):
 async def test_cold_start_embeds_once_and_stores_graph_and_index_in_redis(
     settings: Settings,
 ) -> None:
-    llm = CountingLLM()
+    llm = FakeLLM()
     app = create_app(settings=settings, llm=llm)
 
     async with LifespanManager(app):
@@ -73,7 +60,7 @@ async def test_cold_start_embeds_once_and_stores_graph_and_index_in_redis(
         assert app.state.schema_index_source == "embedded"
         assert app.state.retriever.export_index() is not None
 
-    assert llm.embed_call_count == 1
+    assert len(llm.embed_calls) == 1
 
     checker = RedisCache(settings.redis_url)
     try:
@@ -91,13 +78,13 @@ async def test_cold_start_embeds_once_and_stores_graph_and_index_in_redis(
 async def test_warm_start_with_same_settings_hits_cache_and_makes_zero_embed_calls(
     settings: Settings,
 ) -> None:
-    cold_llm = CountingLLM()
+    cold_llm = FakeLLM()
     cold_app = create_app(settings=settings, llm=cold_llm)
     async with LifespanManager(cold_app):
         version = cold_app.state.graph.version
-    assert cold_llm.embed_call_count == 1
+    assert len(cold_llm.embed_calls) == 1
 
-    warm_llm = CountingLLM()
+    warm_llm = FakeLLM()
     warm_app = create_app(settings=settings, llm=warm_llm)
     async with LifespanManager(warm_app):
         assert warm_app.state.graph.version == version
@@ -107,16 +94,16 @@ async def test_warm_start_with_same_settings_hits_cache_and_makes_zero_embed_cal
         names, _matrix = exported
         assert "orders" in names
 
-    assert warm_llm.embed_call_count == 0
+    assert len(warm_llm.embed_calls) == 0
 
 
 async def test_schema_refresh_invalidates_and_restores_cache(settings: Settings) -> None:
-    llm = CountingLLM()
+    llm = FakeLLM()
     app = create_app(settings=settings, llm=llm)
 
     async with LifespanManager(app):
         version = app.state.graph.version
-        assert llm.embed_call_count == 1  # cold-start build
+        assert len(llm.embed_calls) == 1  # cold-start build
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -126,7 +113,7 @@ async def test_schema_refresh_invalidates_and_restores_cache(settings: Settings)
 
         # refresh() invalidated the cache and rebuilt from scratch -- a
         # second embed() call, not a cache hit.
-        assert llm.embed_call_count == 2
+        assert len(llm.embed_calls) == 2
         assert app.state.schema_index_source == "embedded"
         assert app.state.retriever.export_index() is not None
 

@@ -22,6 +22,7 @@ import structlog
 
 from app.services.bootstrap import AppComponents, refresh_components
 from app.services.query_service import persist_query_log, to_query_response
+from app.services.schema_sync import mark_refreshed
 
 __all__ = ["refresh_schema_job", "run_query_job"]
 
@@ -57,17 +58,20 @@ async def run_query_job(
     structlog.contextvars.bind_contextvars(request_id=request_id, job_id=ctx["job_id"])
 
     components = _components(ctx)
+    # Read together, before the await: the schema-epoch watcher swaps
+    # `pipeline` and `graph` in place (atomically, but only with respect to
+    # other tasks *between* awaits), so reading `graph` after the run could
+    # log this answer under a schema version it was not produced with.
+    pipeline, graph = components.pipeline, components.graph
 
-    out = await components.pipeline.run(
-        question, use_cache=use_cache, use_result_cache=use_result_cache
-    )
+    out = await pipeline.run(question, use_cache=use_cache, use_result_cache=use_result_cache)
 
     await persist_query_log(
         components.session_factory,
         out,
         question=question,
         model=out.model or components.settings.llm_model,
-        schema_version=components.graph.version,
+        schema_version=graph.version,
         request_id=request_id,
     )
 
@@ -82,7 +86,10 @@ async def refresh_schema_job(ctx: dict[Any, Any]) -> dict[str, str]:
     """Re-introspect the target database and rebuild this worker's retriever
     and pipeline, returning the new schema version -- the worker-side twin of
     `POST /api/v1/schema/refresh`, both going through
-    `app.services.bootstrap.refresh_components`."""
+    `app.services.bootstrap.refresh_components` and both announcing the
+    result via `app.services.schema_sync.mark_refreshed`, so the API
+    processes pick this refresh up on their next poll."""
     components = _components(ctx)
     graph = await refresh_components(components)
+    await mark_refreshed(components)
     return {"version": graph.version}

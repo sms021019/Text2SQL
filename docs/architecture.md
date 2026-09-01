@@ -104,7 +104,10 @@ returns `202 {job_id}`; `GET /api/v1/jobs/{job_id}` polls it. The worker
 runs the identical pipeline, caches and schema version — and writes the
 same `query_log` row, carrying the enqueueing request's `request_id`
 through. A dead queue degrades only the async endpoints (503); the
-synchronous route is unaffected.
+synchronous route is unaffected. A schema refresh run in either process
+reaches the other: the refresher bumps an opaque token in Redis, and every
+process polls that token every `SCHEMA_SYNC_POLL_S` seconds and
+re-introspects when it changes (`app/services/schema_sync.py`, ADR 0004).
 
 **Metrics.** The pipeline reports events to a `PipelineObserver` protocol
 defined in `app/core/observer.py`, which imports nothing framework-shaped.
@@ -113,8 +116,15 @@ those into `t2s_*` collectors on a per-app `CollectorRegistry`, served at
 `GET /metrics` and scraped by Prometheus into the Grafana dashboard under
 `deploy/`. The core never learns that Prometheus exists.
 
+Both processes report. The API's registry rides its ASGI app; the worker has
+none, so `app/observability/exporter.py` puts its registry on a WSGI daemon
+thread at `:$WORKER_METRICS_PORT/metrics` (default `9100`), scraped as a
+second Prometheus job. Same metric names, told apart by the `job` label.
+
 ```
-pipeline → PipelineObserver → MetricsObserver → /metrics → Prometheus → Grafana
+API:    pipeline → PipelineObserver → MetricsObserver → GET /metrics   ┐
+                                                                       ├→ Prometheus → Grafana
+worker: pipeline → PipelineObserver → MetricsObserver → :9100/metrics  ┘
 ```
 
 ## Components

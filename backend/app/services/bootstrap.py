@@ -10,7 +10,9 @@ through exactly the same pipeline, cache, and schema version the synchronous
 route does. `publish_components()` mirrors a built `AppComponents` onto
 `app.state` for `app/api/deps.py` to read; `refresh_components()` re-does the
 introspect/retrieve/pipeline half of the build in place, shared by
-`POST /api/v1/schema/refresh` and `app.jobs.tasks.refresh_schema_job`.
+`POST /api/v1/schema/refresh` and `app.jobs.tasks.refresh_schema_job`
+(whichever of those ran it then announces it to the other processes via
+`app.services.schema_sync`).
 
 Ownership
 ---------
@@ -95,10 +97,17 @@ class AppComponents:
     #: The observer handed to `Text2SQLPipeline` -- a `MetricsObserver`, an
     #: injected observer, a `CompositeObserver` of both, or a `NullObserver`.
     observer: PipelineObserver
-    #: Metrics-only observer for the one startup/refresh `cache="schema"`
-    #: event -- see `_resolve_observers`.
+    #: Metrics-only observer for what `prepare_retriever` reports at
+    #: startup/refresh: the `cache="schema"` event always, plus the index
+    #: build's `stage="embed"` event on a miss -- see `_resolve_observers`.
     schema_observer: PipelineObserver
     schema_index_source: SchemaIndexSource
+    #: The shared `schema:epoch` token this process has already accounted
+    #: for -- `None` when Redis never had one (or is down/disabled). Set at
+    #: build time so a process starting *after* someone else's refresh does
+    #: not immediately refresh again for it; advanced by
+    #: `app.services.schema_sync` on both sides of the propagation.
+    schema_epoch: str | None
     owns_llm: bool
     owns_redis: bool
 
@@ -125,11 +134,17 @@ def _resolve_observers(
     """Return `(pipeline_observer, schema_observer)`.
 
     The schema observer is deliberately *not* the pipeline observer: it only
-    ever sees the one `on_cache(cache="schema", ...)` call `prepare_retriever`
-    makes at startup/refresh, kept off of any caller-injected `observer`
-    (e.g. a test's `RecordingObserver`) so that observer's event stream stays
-    exactly one request's worth of pipeline events, nothing from startup.
-    Metrics still see it, via the `MetricsObserver` directly.
+    ever sees what `prepare_retriever` reports at startup/refresh -- the one
+    `on_cache(cache="schema", ...)` call and, on a cache miss, the index
+    build's `on_llm(stage="embed", ...)` -- kept off of any caller-injected
+    `observer` (e.g. a test's `RecordingObserver`) so that observer's event
+    stream stays exactly one request's worth of pipeline events, nothing
+    from startup. Metrics still see both, via the `MetricsObserver` directly.
+
+    The pipeline observer is handed to `prepare_retriever` separately, as
+    `llm_observer`: the retriever keeps it for the *request-time* question
+    embedding, which belongs with `generate`/`repair` on the request's own
+    observer chain.
     """
     if not settings.metrics_enabled:
         return (observer if observer is not None else NullObserver()), NullObserver()
@@ -179,7 +194,12 @@ async def build_components(
 
     graph = await introspect(target_engine)
     retriever, schema_index_source = await prepare_retriever(
-        graph, resolved_llm, settings, schema_cache, observer=schema_observer
+        graph,
+        resolved_llm,
+        settings,
+        schema_cache,
+        observer=schema_observer,
+        llm_observer=pipeline_observer,
     )
     if settings.metrics_enabled:
         set_schema_version(resolved_metrics, graph.version)
@@ -196,6 +216,11 @@ async def build_components(
         redis=resolved_redis,
         observer=pipeline_observer,
     )
+
+    # Baseline, not a bump: adopting whatever epoch is already in Redis
+    # means this process starts in agreement with everyone else and only
+    # refreshes for a bump that happens from now on.
+    schema_epoch = await schema_cache.get_epoch()
 
     return AppComponents(
         settings=settings,
@@ -214,6 +239,7 @@ async def build_components(
         observer=pipeline_observer,
         schema_observer=schema_observer,
         schema_index_source=schema_index_source,
+        schema_epoch=schema_epoch,
         owns_llm=llm is None,
         owns_redis=redis is None,
     )
@@ -232,21 +258,38 @@ async def close_components(components: AppComponents) -> None:
             await aclose()
 
 
-async def refresh_components(components: AppComponents) -> SchemaGraph:
+async def refresh_components(components: AppComponents, *, invalidate: bool = True) -> SchemaGraph:
     """Re-introspect the target database and swap the schema-dependent half
     of `components` (graph, retriever, pipeline, query cache) in place,
     returning the new `SchemaGraph`.
 
-    Shared by `POST /api/v1/schema/refresh` and
-    `app.jobs.tasks.refresh_schema_job` so both refresh paths rebuild the
-    same things in the same order.
+    Two callers, two modes:
+
+    * `invalidate=True` (the default) is the *refresh* path -- `POST
+      /api/v1/schema/refresh` and `app.jobs.tasks.refresh_schema_job`.
+      Dropping the shared cache first is what makes an explicit refresh mean
+      something for an unchanged schema: re-introspection then yields the
+      same `graph.version`, so without the sweep `prepare_retriever` would
+      hit the cache and keep serving the very index the operator asked to
+      rebuild.
+    * `invalidate=False` is the *propagation* path --
+      `app.services.schema_sync.sync_schema_if_stale`. The process that ran
+      the refresh already stored a fresh `schema:{version}:*` index before
+      its `mark_refreshed` made the new epoch visible, so a follower must
+      *load* that index rather than delete it. Invalidating here would cost
+      a full re-embed in every follower instead of one build plus N-1 cache
+      hits, could leave a follower whose LLM is down with a
+      `mark_build_failed` retriever, and would run `invalidate_all`'s epoch
+      read-modify-write concurrently with the next refresher's bump.
+
+    Deliberately lock-free in both modes: two refreshes that overlap each
+    rebuild in full and each swap atomically, so the loser's work is wasted
+    but never half-applied.
     """
     settings = components.settings
 
-    # Invalidate first: a re-introspected graph with the same version (an
-    # unchanged schema) must still rebuild/re-store, not silently keep
-    # serving whatever was cached under that version.
-    await components.schema_cache.invalidate_all()
+    if invalidate:
+        await components.schema_cache.invalidate_all()
 
     graph = await introspect(components.target_engine)
     retriever, schema_index_source = await prepare_retriever(
@@ -255,6 +298,7 @@ async def refresh_components(components: AppComponents) -> SchemaGraph:
         settings,
         components.schema_cache,
         observer=components.schema_observer,
+        llm_observer=components.observer,
     )
     if settings.metrics_enabled:
         set_schema_version(components.metrics, graph.version)

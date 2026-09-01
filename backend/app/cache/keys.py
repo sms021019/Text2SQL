@@ -10,9 +10,23 @@ from __future__ import annotations
 
 import hashlib
 
-__all__ = ["normalise_question", "sql_cache_key", "result_cache_key", "schema_cache_key"]
+__all__ = [
+    "SCHEMA_EPOCH_KEY",
+    "normalise_question",
+    "result_cache_key",
+    "schema_cache_key",
+    "sql_cache_key",
+]
 
 _TRAILING_PUNCT = "?.!;"
+
+#: The cross-process schema-refresh token (`app.services.schema_sync`).
+#: A constant rather than a function -- there is exactly one, shared by
+#: every process on this Redis, and it is deliberately *not* keyed by
+#: schema version: it is what tells a process its version may be stale.
+#: It shares the `schema:` prefix that `SchemaCache.invalidate_all()`
+#: sweeps, which is why that method preserves this key explicitly.
+SCHEMA_EPOCH_KEY = "schema:epoch"
 
 
 def normalise_question(q: str) -> str:

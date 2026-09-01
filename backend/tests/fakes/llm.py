@@ -1,7 +1,7 @@
 import hashlib
 import math
 
-from app.llm.base import Completion, Usage
+from app.llm.base import Completion, EmbeddingResult, Usage
 
 
 class FakeLLM:
@@ -21,6 +21,9 @@ class FakeLLM:
         self.responses: list[str] | dict[str, str] = responses if responses is not None else []
         self.dim = dim
         self.calls: list[tuple[str, str]] = []
+        #: One entry per `embed()` call, holding that call's batch -- so a
+        #: test can assert on how often (and with what) embedding happened.
+        self.embed_calls: list[list[str]] = []
 
     async def complete(self, system: str, user: str, *, temperature: float = 0.0) -> Completion:
         self.calls.append((system, user))
@@ -42,8 +45,12 @@ class FakeLLM:
             raise AssertionError("FakeLLM exhausted")
         return self.responses.pop(0)
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        return [self._embed_one(text) for text in texts]
+    async def embed(self, texts: list[str]) -> EmbeddingResult:
+        self.embed_calls.append(list(texts))
+        usage = Usage(prompt_tokens=len(texts), completion_tokens=0, latency_ms=0.0)
+        return EmbeddingResult(
+            vectors=[self._embed_one(text) for text in texts], usage=usage, model="fake-embed"
+        )
 
     def _embed_one(self, text: str) -> list[float]:
         digest = hashlib.sha256(text.encode("utf-8")).digest()

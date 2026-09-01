@@ -33,6 +33,7 @@ flowchart TD
     Worker --> Retriever
 
     Prometheus["Prometheus"] -. scrape /metrics .-> API
+    Prometheus -. scrape :9100/metrics .-> Worker
     Grafana["Grafana"] --> Prometheus
 ```
 
@@ -45,8 +46,9 @@ in `app/core` talks to it directly except through the `LLMClient` protocol.
 Redis carries three caches and the job queue. The `worker` container runs
 the identical pipeline the API does — same builder, same caches, same schema
 version — so a background job answers exactly as the synchronous route
-would. Prometheus scrapes the API's `/metrics` every 5 s and Grafana serves
-a provisioned dashboard on top of it.
+would, and reports the same metrics from its own `:9100/metrics`.
+Prometheus scrapes both every 5 s and Grafana serves a provisioned
+dashboard on top of it.
 
 ## Quickstart
 
@@ -64,6 +66,7 @@ result table. The stack also publishes:
 |---|---|
 | http://localhost:5173 | Frontend |
 | http://localhost:8000/docs | API (OpenAPI UI); metrics at `/metrics` |
+| http://localhost:9100/metrics | arq worker metrics (no UI — it serves nothing else) |
 | http://localhost:9090 | Prometheus |
 | http://localhost:3000 | Grafana → *Text2SQL overview* (anonymous viewer; `admin`/`admin` to edit) |
 
@@ -151,7 +154,34 @@ execution outcome, cache read) to a `PipelineObserver` protocol defined in
 curl -s http://localhost:8000/metrics | grep t2s_
 ```
 
-`prometheus` scrapes that every 5 s; `grafana` provisions its datasource
+LLM calls are labelled by stage — `generate`, `repair`, and `embed` (the
+schema retriever's question and index embeddings) — with tokens and
+estimated cost per model.
+
+The arq worker runs the same pipeline, so it records the same `t2s_*`
+collectors. Having no ASGI app to hang a route off, it serves them from a
+WSGI daemon thread (`app/observability/exporter.py`) on
+`WORKER_METRICS_PORT` — `9100` by default, published on localhost by
+compose:
+
+```bash
+curl -s http://localhost:9100/metrics | grep t2s_
+```
+
+That endpoint doubles as the `worker` container's healthcheck, since it
+only answers once the worker has finished building its components — unless
+`METRICS_ENABLED=false`, in which case there is nothing to curl and the
+check passes trivially rather than pinning the container to `unhealthy`.
+Prometheus scrapes the endpoint as a second job, so the two processes'
+series are distinguished by `job="text2sql-backend"` /
+`job="text2sql-worker"`.
+
+`WORKER_METRICS_PORT` in `.env` moves the worker's port, its compose
+publication and its healthcheck together; the Prometheus scrape target in
+`deploy/prometheus/prometheus.yml` is a static file and needs the matching
+edit by hand.
+
+`prometheus` scrapes both every 5 s; `grafana` provisions its datasource
 and the *Text2SQL overview* dashboard from
 [`deploy/grafana/`](deploy/grafana/) — LLM p50/p95 by stage, SQL success
 rate, cache hit rate per tier, tokens per minute and estimated cost, queue
@@ -294,15 +324,6 @@ detail and the design-decision writeups (§4) that the ADRs in
 * **Phase 3 (`v0.3`)** — CI on every PR, multi-arch image releases to GHCR.
 * **Phase 4 (`v1.0`)** — Kubernetes (k3d locally, Terraform-provisioned EKS
   in the cloud).
-
-Known gaps carried out of Phase 2, both deliberate:
-
-* `query_log` has no `cache_status` column, so the per-request cache outcome
-  is visible in the API response and in Prometheus but not queryable
-  historically out of `app_db`.
-* A schema refresh applies to one process only — `POST /schema/refresh` for
-  the API, `refresh_schema_job` for the worker. There is no cross-process
-  invalidation yet.
 
 ## Project layout
 

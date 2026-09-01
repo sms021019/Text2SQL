@@ -46,7 +46,9 @@ exposed: a dashboard someone can look at while a load test runs.
 
 4. **The metric set** (names fixed, all `t2s_`-prefixed):
    `t2s_llm_request_duration_seconds{provider,model,stage}` (buckets
-   0.25 s → 60 s, wide because completions take seconds),
+   10 ms → 60 s: wide at the top because completions take seconds, and
+   down to 10 ms because `stage="embed"` calls take milliseconds and would
+   otherwise all pile into the first bucket),
    `t2s_llm_tokens_total{provider,model,direction}`,
    `t2s_llm_cost_usd_total{provider,model}`,
    `t2s_sql_guard_rejections_total{reason}`,
@@ -96,10 +98,12 @@ exposed: a dashboard someone can look at while a load test runs.
   single-service pipeline the span tree would mostly restate the stage
   timings already in the logs, at the cost of a collector in the stack.
 - **Push-based metrics (Pushgateway/StatsD).** Would let the arq worker
-  report too, without an HTTP endpoint. Rejected for now: pull is the
+  report too, without an HTTP endpoint. Rejected: pull is the
   Kubernetes-native model and the Pushgateway's stale-metric semantics are
   a known footgun. Scraping the worker properly means giving it a small
-  metrics endpoint — a follow-up if job-level metrics start to matter.
+  metrics endpoint — done, in `app/observability/exporter.py`: the worker's
+  `on_startup` serves its registry on `WORKER_METRICS_PORT` from a WSGI
+  daemon thread, scraped as the `text2sql-worker` job.
 - **Deriving dashboards from `query_log` in Postgres.** Already possible for
   after-the-fact analysis and used by `scripts/eval.py`, but it is a
   reporting database, not a time-series one; percentiles and rates over it
@@ -117,21 +121,35 @@ exposed: a dashboard someone can look at while a load test runs.
   needs its multiprocess-directory dance under gunicorn; the deployment
   answer here is one uvicorn worker per container and horizontal scaling —
   which is what Phase 4's Kubernetes manifests will do anyway.
-- **`t2s_llm_request_duration_seconds` has no `stage="embed"` series, even
-  though an embedding call happens on every full-path request.**
-  `SchemaRetriever._score_tables` calls `LLMClient.embed()` to embed the
-  question (`app/core/schema/retrieve.py`), but `embed()` returns bare
-  vectors and no `Usage`, so there is nothing for the pipeline to hand to
-  `observer.on_llm(...)` — only `generate` and `repair` reach it. The
-  embedding latency is therefore folded into
-  `t2s_pipeline_duration_seconds` and visible per-stage only in the logs.
-  Instrumenting it means widening `LLMClient.embed` to return a `Usage`
-  (both adapters, plus `FakeLLM`), which is deferred: the plan's metric set
-  lists `stage=embed`, but the interface change is a larger edit than the
-  Phase 2 brief covers.
-- The arq worker's metrics are recorded into a registry nothing scrapes
-  (see ADR 0004). Job-level numbers come from its logs until it gets an
-  endpoint of its own.
+- **`t2s_llm_request_duration_seconds` carries a `stage="embed"` series.**
+  `LLMClient.embed()` returns an `EmbeddingResult(vectors, usage, model)`
+  rather than bare vectors, so `SchemaRetriever` can report every embedding
+  to `observer.on_llm(stage="embed", ...)` — the per-question one in
+  `_score_tables()` and the index build in `build_index()`.
+  `usage.prompt_tokens` is the number of tokens embedded where the provider
+  reports it (Ollama's `prompt_eval_count`, OpenAI's `usage.prompt_tokens`)
+  and `0` where it does not; `completion_tokens` is always `0`. Cost is
+  priced through the same `LLM_PRICES_USD_PER_1K` table as any other model,
+  so an embed model absent from it contributes `0` to
+  `t2s_llm_cost_usd_total`.
+  The two embeddings deliberately report to *different* observers: the
+  request-time question embed goes to the pipeline observer (metrics plus
+  any injected observer, like `generate`/`repair`), while the
+  startup/refresh index build goes to the metrics-only schema observer, so
+  an injected observer's stream stays exactly one request's worth of events
+  (`app.services.bootstrap._resolve_observers`).
+  Embed usage is **metrics-only**: it is never folded into
+  `PipelineOutput.usage` or `query_log.prompt_tokens`, which stay a record
+  of what the *completion* calls cost — otherwise a per-request token count
+  would silently mix two different models' tokenizers.
+- **The same `t2s_*` names now come from two processes.** Prometheus tells
+  them apart by the `job` label (`text2sql-backend`, `text2sql-worker`), so
+  every dashboard panel is either an aggregate across both
+  (`sum by (model) (t2s_llm_cost_usd_total)`) or an explicit `by (job)`
+  split. The one exception is pinned: `t2s_jobs_queue_depth` is queried
+  `{job="text2sql-backend"}`, because the worker exports the collector but
+  never `.set()`s it — the API owns the sampler — and an unfiltered query
+  would draw a second line flat at `0`.
 - Cost figures are estimates and drift with vendor pricing; the table is
   config, not code, so correcting it is an env var away — but nothing
   validates it against a bill.

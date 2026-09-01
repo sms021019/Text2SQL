@@ -45,3 +45,6 @@ class QueryLog(Base):
     model: Mapped[str]
     schema_version: Mapped[str]
     request_id: Mapped[str]
+    #: PipelineOutput.cache_status for this run (miss | sql_hit | result_hit |
+    #: bypass | disabled). NULL only on rows older than migration 0002.
+    cache_status: Mapped[str | None]

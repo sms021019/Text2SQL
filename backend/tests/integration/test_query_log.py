@@ -1,8 +1,9 @@
 import uuid
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.pipeline import PipelineOutput, StageTiming
 from app.core.sql.executor import QueryResult
@@ -76,6 +77,7 @@ async def test_migration_creates_table_and_record_query_round_trips(app_db_url: 
         assert fetched.schema_version == "v1"
         assert fetched.request_id == request_id
         assert fetched.created_at is not None
+        assert fetched.cache_status == "disabled"  # _fake_output builds cache_status="disabled"
     finally:
         await engine.dispose()
 
@@ -112,3 +114,23 @@ async def test_record_query_captures_failed_pipeline(app_db_url: str) -> None:
 def test_upgrade_to_head_is_idempotent(app_db_url: str) -> None:
     upgrade_to_head(app_db_url)
     upgrade_to_head(app_db_url)
+
+
+async def test_record_query_persists_cache_status(app_db_url: str) -> None:
+    upgrade_to_head(app_db_url)
+    engine = create_async_engine(app_db_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    request_id = str(uuid.uuid4())
+    out = replace(_fake_output(), cache_status="sql_hit")
+    try:
+        async with factory() as session:
+            await record_query(
+                session, out, question="q", model="m", schema_version="v1", request_id=request_id
+            )
+        async with factory() as session:
+            fetched = (
+                await session.execute(select(QueryLog).where(QueryLog.request_id == request_id))
+            ).scalar_one()
+        assert fetched.cache_status == "sql_hit"
+    finally:
+        await engine.dispose()

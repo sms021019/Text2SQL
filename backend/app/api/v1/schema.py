@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from app.api.deps import _require_ready, get_graph
 from app.core.schema.models import SchemaGraph
 from app.services.bootstrap import publish_components, refresh_components
+from app.services.schema_sync import mark_refreshed
 
 __all__ = ["router"]
 
@@ -69,16 +70,21 @@ async def get_schema(graph: SchemaGraph = Depends(get_graph)) -> SchemaResponse:
     dependencies=[Depends(_require_ready)],
 )
 async def refresh_schema(request: Request) -> RefreshResponse:
-    """Rebuild this app's schema-dependent runtime in place and re-publish it
-    onto `app.state`. The rebuild itself lives in
-    `app.services.bootstrap.refresh_components`, shared with the worker-side
-    `app.jobs.tasks.refresh_schema_job`; `publish_components` then swaps the
-    `app.state` mirror the request handlers read -- with no `await` in
-    between, so it is atomic with respect to any other request task on the
-    same event loop."""
+    """Rebuild this app's schema-dependent runtime in place, announce the
+    refresh to every other process, and re-publish onto `app.state`.
+
+    The rebuild itself lives in `app.services.bootstrap.refresh_components`,
+    shared with the worker-side `app.jobs.tasks.refresh_schema_job`;
+    `mark_refreshed` then bumps the shared Redis epoch so the arq worker and
+    any other API replica re-introspect on their next poll (see
+    `app.services.schema_sync`); `publish_components` swaps the `app.state`
+    mirror the request handlers read -- with no `await` between the rebuild
+    and that swap other than the epoch write, whose failure mode is a
+    no-op."""
     state = request.app.state
 
     graph = await refresh_components(state.components)
+    await mark_refreshed(state.components)
     publish_components(state, state.components)
 
     return RefreshResponse(version=graph.version)

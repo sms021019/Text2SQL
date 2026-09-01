@@ -9,13 +9,27 @@ lifespan uses, so a job runs through the identical pipeline, caches, and
 schema version the synchronous routes do -- and puts it in `ctx` for
 `app.jobs.tasks` to read; `on_shutdown` closes it.
 
+It also starts the schema-epoch watcher (`app.services.schema_sync`), the
+same loop `app.main`'s lifespan runs, so a `POST /api/v1/schema/refresh`
+served by an API process reaches this worker too -- without it, "identical
+runtimes" would hold only until the first refresh. There is no `app.state`
+mirror here, so no `on_refreshed` callback: `app.jobs.tasks` reads
+`ctx["components"]` directly, which the loop mutates in place.
+
 The worker does *not* migrate the app database: `app.main`'s lifespan owns
-that, so the two processes never race Alembic (compose starts them together).
-It does get a `MetricsObserver`, since `build_components` wires one up for
-free when `metrics_enabled`; there is no `/metrics` endpoint here to scrape
-that registry, so job-level observability comes from the structured logs --
-the observer exists only to keep the worker's pipeline wiring identical to
-the API's.
+that, so the two processes never race Alembic (compose orders the worker
+after a healthy `backend`, so the migration is done before the first job).
+
+`build_components` wires up a `MetricsObserver` for free when
+`metrics_enabled`, and `on_startup` now serves that registry itself:
+`app.observability.exporter.start_metrics_server` puts the standard
+Prometheus exposition on `http://0.0.0.0:$WORKER_METRICS_PORT/metrics`
+(default `9100`, `0` disables it) from a daemon thread, since there is no
+ASGI app here to hang a route off. Prometheus scrapes it as the
+`text2sql-worker` job, so job-level `t2s_*` series are graphable rather than
+log-only -- see ADR 0005. `t2s_jobs_queue_depth` stays API-side: one
+process samples the queue, and the worker reading the same `ZCARD` would
+just publish a duplicate series under a second `job` label.
 
 Tests do not use `WorkerSettings`: they build their own
 `arq.worker.Worker(..., ctx={"components": ...})` with a `FakeLLM`, since
@@ -25,14 +39,18 @@ needed here. See `tests/integration/test_jobs.py`.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from typing import Any
 
 from arq.connections import RedisSettings
 
 from app.config import get_settings
 from app.jobs.tasks import refresh_schema_job, run_query_job
+from app.observability.exporter import start_metrics_server
 from app.observability.logging import configure_logging
 from app.services.bootstrap import build_components, close_components
+from app.services.schema_sync import log_task_exit, watch_schema_epoch
 
 __all__ = ["WorkerSettings"]
 
@@ -41,10 +59,34 @@ _settings = get_settings()
 
 async def startup(ctx: dict[Any, Any]) -> None:
     configure_logging(_settings.log_level)
-    ctx["components"] = await build_components(_settings)
+    components = await build_components(_settings)
+    ctx["components"] = components
+    if _settings.metrics_enabled and _settings.worker_metrics_port > 0:
+        ctx["metrics_server"] = start_metrics_server(
+            components.metrics.registry, port=_settings.worker_metrics_port
+        )
+    if _settings.schema_sync_poll_s > 0:
+        watch = asyncio.create_task(
+            watch_schema_epoch(components, period_s=_settings.schema_sync_poll_s)
+        )
+        # Same guard `app.main`'s lifespan puts on its copy of this loop: a
+        # watcher that dies on its own leaves the worker silently pinned to
+        # a stale schema, and nothing else would say so.
+        watch.add_done_callback(log_task_exit("schema epoch watcher"))
+        ctx["schema_watch"] = watch
 
 
 async def shutdown(ctx: dict[Any, Any]) -> None:
+    # Watcher first: it calls into `components`, so it must be stopped (and
+    # awaited, not merely cancelled) before anything it touches is closed.
+    watch = ctx.pop("schema_watch", None)
+    if watch is not None:
+        watch.cancel()
+        with suppress(asyncio.CancelledError):
+            await watch
+    server = ctx.pop("metrics_server", None)
+    if server is not None:
+        server.close()
     components = ctx.pop("components", None)
     if components is not None:
         await close_components(components)

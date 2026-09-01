@@ -41,7 +41,8 @@ running the identical pipeline:
    and the same schema version as the synchronous route — there is no
    second, drifting copy of the wiring. The worker deliberately does *not*
    migrate the app database: the API process owns that, so the two never
-   race Alembic.
+   race Alembic — and compose starts the worker only once `backend` is
+   healthy, so the migration is finished before the first job can write.
 5. **Polling, not SSE/WebSocket.** Polling works through any ingress and
    any proxy, needs no connection state, and is three lines in the
    frontend. Streaming is a stretch goal, not a Phase 2 requirement.
@@ -85,18 +86,44 @@ running the identical pipeline:
 - arq pickles job results, so `run_query_job` returns a plain dict
   (`QueryResponse.model_dump()`) rather than a pydantic model — a pickled
   model would tie every future reader to today's class definition.
-- **`refresh_schema_job` refreshes only the worker process's own
-  components.** The API process refreshes via `POST /api/v1/schema/refresh`,
-  which rebuilds *its* graph, retriever, pipeline, and query cache. Nothing
-  propagates a refresh from one process to the other, so after a schema
-  change both must be refreshed (or restarted) to agree on a schema
-  version. Cross-process invalidation — a pub/sub notification, or a
-  version check on each request — is a deliberate follow-up.
-- The worker exposes no HTTP endpoint, so **its metrics are not scraped**:
-  Prometheus sees the API process only. Job-level observability comes from
-  the worker's structured logs. The worker still builds a `MetricsObserver`
-  (it comes free with `build_components`), purely to keep its wiring
-  identical to the API's — see ADR 0005.
+- **A refresh propagates to every process, through a Redis epoch.**
+  Whoever re-introspects — `POST /api/v1/schema/refresh` in an API process,
+  `refresh_schema_job` in the worker — calls
+  `app.services.schema_sync.mark_refreshed`, which writes a fresh opaque
+  token to `schema:epoch`. Every process runs a watcher loop
+  (`watch_schema_epoch`, started by `app.main`'s lifespan and by the
+  worker's `on_startup`) that reads that key every `SCHEMA_SYNC_POLL_S`
+  seconds (default `5`; `0` disables it) and, when the token differs from
+  the one it has already accounted for, runs the same `refresh_components`
+  on itself and adopts it. A process built *after* someone else's refresh
+  takes the current token as its baseline, so it never re-refreshes for
+  history. With Redis down or `CACHE_ENABLED=false` the mechanism no-ops:
+  the refresh still applies locally and the other processes simply never
+  hear about it — the pre-epoch behaviour, never an error.
+
+  Polling rather than pub/sub, deliberately. `RedisCache` is
+  request/response only; a subscriber would need a second, long-lived
+  connection type, with its own failure and reconnection modes, for a
+  signal sent a handful of times a day. Polling also survives the case
+  pub/sub handles worst: a process that was restarting when the message
+  went out has missed it forever, while a poller catches up on its next
+  tick. The cost is bounded staleness of `SCHEMA_SYNC_POLL_S` and one `GET`
+  per process per tick.
+
+  This also settles PLAN.md item 3's "schema refresh also becomes a job":
+  `refresh_schema_job` *is* that job, and with propagation in place the
+  worker's refresh reaches the API and the API's reaches the worker — so
+  no HTTP trigger for the job is needed, `POST /api/v1/schema/refresh`
+  already refreshes the whole deployment.
+- **The worker's metrics are scraped.** It builds a `MetricsObserver` for
+  free with `build_components`, and `on_startup` serves that registry on
+  `WORKER_METRICS_PORT` (default `9100`) from a WSGI daemon thread
+  (`app/observability/exporter.py`), scraped as the `text2sql-worker` job.
+  Its series carry Prometheus's `job="text2sql-worker"` label, so the
+  dashboard's `sum(...)` panels aggregate both processes and a per-process
+  view is a `by (job)` away — see ADR 0005. `t2s_jobs_queue_depth` stays
+  API-side: it samples the queue, not the work, so one sampler is right.
+  The structured logs remain the per-job record.
 - Two processes now build the same runtime at startup, which doubles
   connections to Postgres, Redis, and the LLM at boot. That is the price of
   running the identical code in both, and it is the right trade at this

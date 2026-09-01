@@ -24,7 +24,7 @@
       "id": 1,
       "type": "timeseries",
       "title": "LLM latency by stage (p50 / p95)",
-      "description": "t2s_llm_request_duration_seconds, quantiles over a 5m window. Stages: generate (the first completion) and repair (the one-shot retry after a failed execution). The question-embedding call is not reported to the observer (it returns no Usage), so there is no embed stage here -- see ADR 0005.",
+      "description": "t2s_llm_request_duration_seconds, quantiles over a 5m window. Stages: generate (the first completion), repair (the one-shot retry after a failed execution), and embed (the schema retriever's embedding calls -- the question on every full-path request, plus the one-off schema index build at startup/refresh, which is why the embed series is usually much faster and much more frequent than the completions) -- see ADR 0005.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -372,7 +372,7 @@
       "id": 7,
       "type": "stat",
       "title": "Estimated LLM cost (USD, cumulative)",
-      "description": "t2s_llm_cost_usd_total since the backend process started, by model. Priced from Settings.llm_prices_usd_per_1k; a model absent from that table -- every local Ollama model -- costs 0.",
+      "description": "t2s_llm_cost_usd_total summed over the scraped processes (backend + worker), by model. Each process counts from its own start, so this total drops whenever either one restarts -- read it as \"spend since the last deploy\", not as a lifetime bill. Priced from Settings.llm_prices_usd_per_1k; a model absent from that table -- every local Ollama model -- costs 0.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -421,7 +421,7 @@
       "id": 8,
       "type": "timeseries",
       "title": "Background job queue depth",
-      "description": "t2s_jobs_queue_depth -- ZCARD of the arq queue, sampled by the API process every QUEUE_DEPTH_SAMPLE_S seconds (default 5).",
+      "description": "t2s_jobs_queue_depth -- ZCARD of the arq queue, sampled by the API process every QUEUE_DEPTH_SAMPLE_S seconds (default 5). Pinned to job=\"text2sql-backend\": the worker exports the same collector but never sets it, so an unfiltered query would draw a second line flat at 0.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -466,7 +466,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "t2s_jobs_queue_depth",
+          "expr": "t2s_jobs_queue_depth{job=\"text2sql-backend\"}",
           "legendFormat": "queued jobs"
         }
       ]

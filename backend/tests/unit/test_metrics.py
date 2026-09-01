@@ -75,6 +75,67 @@ def test_on_llm_unknown_model_costs_zero_but_still_records_tokens() -> None:
     ) == pytest.approx(100.0)
 
 
+def test_on_llm_embed_stage_gets_its_own_series() -> None:
+    """`SchemaRetriever` reports its embedding calls as `stage="embed"` with
+    `completion_tokens=0`; they must land on their own histogram series and
+    be priced through the same (usually absent) model entry."""
+    metrics = Metrics()
+    observer = _observer(metrics)
+
+    observer.on_llm(
+        stage="embed",
+        model="nomic-embed-text",
+        usage=Usage(prompt_tokens=42, completion_tokens=0, latency_ms=12.0),
+    )
+
+    embed_labels = {"provider": "openai", "model": "nomic-embed-text", "stage": "embed"}
+    assert metrics.registry.get_sample_value(
+        "t2s_llm_request_duration_seconds_count", embed_labels
+    ) == pytest.approx(1.0)
+    assert metrics.registry.get_sample_value(
+        "t2s_llm_request_duration_seconds_sum", embed_labels
+    ) == pytest.approx(0.012)
+    assert (
+        metrics.registry.get_sample_value(
+            "t2s_llm_request_duration_seconds_count",
+            {"provider": "openai", "model": "nomic-embed-text", "stage": "generate"},
+        )
+        is None
+    )
+    assert metrics.registry.get_sample_value(
+        "t2s_llm_tokens_total",
+        {"provider": "openai", "model": "nomic-embed-text", "direction": "prompt"},
+    ) == pytest.approx(42.0)
+    # Not in PRICES -- an unpriced embed model costs 0, like any other.
+    assert metrics.registry.get_sample_value(
+        "t2s_llm_cost_usd_total", {"provider": "openai", "model": "nomic-embed-text"}
+    ) == pytest.approx(0.0)
+
+
+def test_llm_duration_buckets_resolve_millisecond_embed_latencies() -> None:
+    """A 12 ms embed must be distinguishable from a 90 ms one. With the
+    original 0.25 s lowest bucket both landed in `le="0.25"` and
+    `histogram_quantile` interpolated the same constant for every embed
+    latency, making the Grafana LLM-latency panel's embed series meaningless
+    -- so the histogram keeps sub-250 ms boundaries."""
+    metrics = Metrics()
+    observer = _observer(metrics)
+    labels = {"provider": "openai", "model": "nomic-embed-text", "stage": "embed"}
+
+    observer.on_llm(stage="embed", model="nomic-embed-text", usage=Usage(1, 0, 12.0))
+    observer.on_llm(stage="embed", model="nomic-embed-text", usage=Usage(1, 0, 90.0))
+
+    def bucket(le: str) -> float | None:
+        return metrics.registry.get_sample_value(
+            "t2s_llm_request_duration_seconds_bucket", {**labels, "le": le}
+        )
+
+    assert bucket("0.01") == pytest.approx(0.0)  # neither call is under 10 ms
+    assert bucket("0.025") == pytest.approx(1.0)  # the 12 ms one, alone
+    assert bucket("0.1") == pytest.approx(2.0)  # the 90 ms one joins it
+    assert bucket("0.25") == pytest.approx(2.0)
+
+
 def test_on_guard_reject_increments_rejections_counter_by_reason() -> None:
     metrics = Metrics()
     observer = _observer(metrics)
