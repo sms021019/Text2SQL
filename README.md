@@ -161,17 +161,25 @@ estimated cost per model.
 The arq worker runs the same pipeline, so it records the same `t2s_*`
 collectors. Having no ASGI app to hang a route off, it serves them from a
 WSGI daemon thread (`app/observability/exporter.py`) on
-`WORKER_METRICS_PORT` — `9100` by default, `0` to disable, published on
-localhost by compose:
+`WORKER_METRICS_PORT` — `9100` by default, published on localhost by
+compose:
 
 ```bash
 curl -s http://localhost:9100/metrics | grep t2s_
 ```
 
 That endpoint doubles as the `worker` container's healthcheck, since it
-only answers once the worker has finished building its components.
-Prometheus scrapes it as a second job, so the two processes' series are
-distinguished by `job="text2sql-backend"` / `job="text2sql-worker"`.
+only answers once the worker has finished building its components — unless
+`METRICS_ENABLED=false`, in which case there is nothing to curl and the
+check passes trivially rather than pinning the container to `unhealthy`.
+Prometheus scrapes the endpoint as a second job, so the two processes'
+series are distinguished by `job="text2sql-backend"` /
+`job="text2sql-worker"`.
+
+`WORKER_METRICS_PORT` in `.env` moves the worker's port, its compose
+publication and its healthcheck together; the Prometheus scrape target in
+`deploy/prometheus/prometheus.yml` is a static file and needs the matching
+edit by hand.
 
 `prometheus` scrapes both every 5 s; `grafana` provisions its datasource
 and the *Text2SQL overview* dashboard from

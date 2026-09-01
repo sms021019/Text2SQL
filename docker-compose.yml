@@ -44,9 +44,20 @@ services:
   worker:
     # Same image as `backend`, with the uvicorn CMD replaced by the arq
     # worker. It serves no API, but it does serve its own Prometheus
-    # registry on 9100 (app/observability/exporter.py) -- published on
-    # 127.0.0.1 for `curl`-ing by hand; Prometheus scrapes `worker:9100`
-    # over the compose network.
+    # registry (app/observability/exporter.py) -- published on 127.0.0.1
+    # for `curl`-ing by hand; Prometheus scrapes `worker:9100` over the
+    # compose network.
+    #
+    # WORKER_METRICS_PORT (from the project .env, default 9100) is
+    # interpolated into all three places below -- the environment, the
+    # published port, and the healthcheck -- so changing it in .env moves
+    # every one of them together. It chooses the *port*; it is not the
+    # off switch here, because compose still needs a non-zero number to
+    # publish. Under compose, turning the exporter off means
+    # METRICS_ENABLED=false. One thing does *not* follow automatically:
+    # `deploy/prometheus/prometheus.yml` is a mounted static file, so its
+    # `worker:9100` target has to be edited by hand to match a changed
+    # port.
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -54,12 +65,19 @@ services:
     # Replaces the image's HEALTHCHECK, which curls the API's /healthz --
     # a route this container does not serve. The metrics endpoint is the
     # worker's equivalent liveness signal: it only answers once
-    # `on_startup` has finished building the components. (Setting
-    # METRICS_ENABLED=false in .env therefore leaves this container
-    # permanently `unhealthy` -- it still processes jobs, and nothing here
-    # gates on `worker` being healthy, but expect the red status.)
+    # `on_startup` has finished building the components.
+    #
+    # The METRICS_ENABLED guard is compose-level interpolation, baked into
+    # the command at `docker compose config` time, not read from the
+    # container's environment: with metrics off there is no endpoint to
+    # curl, so the check passes trivially rather than pinning the container
+    # to `unhealthy` forever (which would deadlock any future
+    # `--wait` / `depends_on: worker: service_healthy`). It matches the
+    # literal `false` .env.example documents.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:9100/metrics"]
+      test:
+        - CMD-SHELL
+        - '[ "${METRICS_ENABLED:-true}" = false ] || curl -fsS http://localhost:${WORKER_METRICS_PORT:-9100}/metrics'
       interval: 10s
       timeout: 3s
       retries: 5
@@ -71,9 +89,9 @@ services:
       TARGET_DB_URL: postgresql+asyncpg://readonly:readonly@postgres:5432/target
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434}
       REDIS_URL: redis://redis:6379/0
-      WORKER_METRICS_PORT: "9100"
+      WORKER_METRICS_PORT: "${WORKER_METRICS_PORT:-9100}"
     ports:
-      - "127.0.0.1:9100:9100"
+      - "127.0.0.1:${WORKER_METRICS_PORT:-9100}:${WORKER_METRICS_PORT:-9100}"
     depends_on:
       postgres:
         condition: service_healthy
