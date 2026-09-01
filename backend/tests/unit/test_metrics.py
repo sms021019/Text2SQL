@@ -75,6 +75,43 @@ def test_on_llm_unknown_model_costs_zero_but_still_records_tokens() -> None:
     ) == pytest.approx(100.0)
 
 
+def test_on_llm_embed_stage_gets_its_own_series() -> None:
+    """`SchemaRetriever` reports its embedding calls as `stage="embed"` with
+    `completion_tokens=0`; they must land on their own histogram series and
+    be priced through the same (usually absent) model entry."""
+    metrics = Metrics()
+    observer = _observer(metrics)
+
+    observer.on_llm(
+        stage="embed",
+        model="nomic-embed-text",
+        usage=Usage(prompt_tokens=42, completion_tokens=0, latency_ms=250.0),
+    )
+
+    embed_labels = {"provider": "openai", "model": "nomic-embed-text", "stage": "embed"}
+    assert metrics.registry.get_sample_value(
+        "t2s_llm_request_duration_seconds_count", embed_labels
+    ) == pytest.approx(1.0)
+    assert metrics.registry.get_sample_value(
+        "t2s_llm_request_duration_seconds_sum", embed_labels
+    ) == pytest.approx(0.25)
+    assert (
+        metrics.registry.get_sample_value(
+            "t2s_llm_request_duration_seconds_count",
+            {"provider": "openai", "model": "nomic-embed-text", "stage": "generate"},
+        )
+        is None
+    )
+    assert metrics.registry.get_sample_value(
+        "t2s_llm_tokens_total",
+        {"provider": "openai", "model": "nomic-embed-text", "direction": "prompt"},
+    ) == pytest.approx(42.0)
+    # Not in PRICES -- an unpriced embed model costs 0, like any other.
+    assert metrics.registry.get_sample_value(
+        "t2s_llm_cost_usd_total", {"provider": "openai", "model": "nomic-embed-text"}
+    ) == pytest.approx(0.0)
+
+
 def test_on_guard_reject_increments_rejections_counter_by_reason() -> None:
     metrics = Metrics()
     observer = _observer(metrics)

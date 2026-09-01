@@ -64,6 +64,14 @@ async def test_metrics_endpoint_reports_pipeline_execution_and_schema_cache_samp
     # recorded exactly one `cache="schema"` sample.
     assert 't2s_cache_requests_total{cache="schema",outcome="miss"} 1.0' in body
 
+    # `SchemaRetriever` reports both of its embedding calls (the startup
+    # index build and this request's question) as `stage="embed"`;
+    # `FakeLLM.embed()` names its model `fake-embed`.
+    assert (
+        't2s_llm_request_duration_seconds_count{model="fake-embed",'
+        'provider="ollama",stage="embed"} 2.0' in body
+    )
+
 
 async def test_metrics_endpoint_has_http_samples_for_instrumented_routes_only(
     client: AsyncClient,

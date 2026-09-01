@@ -61,6 +61,8 @@ async def prepare_retriever(
     settings: Settings,
     schema_cache: SchemaCache,
     observer: PipelineObserver | None = None,
+    *,
+    llm_observer: PipelineObserver | None = None,
 ) -> tuple[SchemaRetriever, SchemaIndexSource]:
     """Return a `SchemaRetriever` for `graph`, built either from a cached
     index (`SchemaCache.load(graph.version)`, no LLM call) or, on a miss, by
@@ -74,12 +76,19 @@ async def prepare_retriever(
     `observer` (defaulting to a no-op `NullObserver`) gets exactly one
     `on_cache(cache="schema", outcome=...)` call per invocation, mapped from
     the returned `SchemaIndexSource` -- see `_CACHE_OUTCOME`. Callers pass a
-    dedicated metrics-only observer here (`app.main`'s `schema_observer`),
-    not the per-request pipeline observer a test might inject, since this
-    runs once at startup/refresh rather than per query.
+    dedicated metrics-only observer here (`app.services.bootstrap`'s
+    `schema_observer`), not the per-request pipeline observer a test might
+    inject, since this runs once at startup/refresh rather than per query.
+    That same `observer` also gets this call's `on_llm(stage="embed", ...)`
+    event, for the same reason -- passed to `build_index()` explicitly.
+
+    `llm_observer` is the observer the returned retriever keeps for the rest
+    of its life: every *request-time* question embedding is reported there,
+    so it belongs on the pipeline observer chain (metrics plus any injected
+    observer) alongside `generate`/`repair`.
     """
     resolved_observer: PipelineObserver = observer if observer is not None else NullObserver()
-    retriever = SchemaRetriever(graph, llm, top_k=settings.retrieve_top_k)
+    retriever = SchemaRetriever(graph, llm, top_k=settings.retrieve_top_k, observer=llm_observer)
 
     cached = await schema_cache.load(graph.version)
     if cached is not None:
@@ -98,7 +107,10 @@ async def prepare_retriever(
             return retriever, "cache"
 
     try:
-        await asyncio.wait_for(retriever.build_index(), timeout=settings.startup_embed_timeout_s)
+        await asyncio.wait_for(
+            retriever.build_index(observer=resolved_observer),
+            timeout=settings.startup_embed_timeout_s,
+        )
     except TimeoutError:
         logger.warning(
             "schema index build timed out after %ss, will retry lazily",

@@ -3,7 +3,7 @@ import time
 import httpx
 
 from app.core.errors import LLMError
-from app.llm.base import Completion, Usage
+from app.llm.base import Completion, EmbeddingResult, Usage
 
 
 class OpenAICompatClient:
@@ -64,7 +64,8 @@ class OpenAICompatClient:
             raise LLMError(f"openai chat returned an unexpected response shape: {exc}") from exc
         return Completion(text=text, usage=usage, model=model)
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(self, texts: list[str]) -> EmbeddingResult:
+        start = time.perf_counter()
         try:
             resp = await self._client.post(
                 f"{self.base_url}/v1/embeddings",
@@ -73,15 +74,20 @@ class OpenAICompatClient:
             )
         except httpx.HTTPError as exc:
             raise LLMError(f"openai embed request failed: {exc}") from exc
+        latency_ms = (time.perf_counter() - start) * 1000
         if resp.is_error:
             raise LLMError(f"openai embed failed: {resp.status_code} {resp.text[:300]}")
         try:
             data = resp.json()
             items = sorted(data["data"], key=lambda item: item["index"])
             embeddings: list[list[float]] = [item["embedding"] for item in items]
+            # `usage.completion_tokens` is never reported for embeddings.
+            prompt_tokens = int(data.get("usage", {}).get("prompt_tokens", 0))
+            model: str = data.get("model", self.embed_model)
         except (AttributeError, KeyError, IndexError, TypeError, ValueError) as exc:
             raise LLMError(f"openai embed returned an unexpected response shape: {exc}") from exc
-        return embeddings
+        usage = Usage(prompt_tokens=prompt_tokens, completion_tokens=0, latency_ms=latency_ms)
+        return EmbeddingResult(vectors=embeddings, usage=usage, model=model)
 
     async def aclose(self) -> None:
         await self._client.aclose()

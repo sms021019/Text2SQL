@@ -365,9 +365,11 @@ async def test_observer_sees_cache_and_execution_hooks_on_happy_path(settings: S
             )
     assert resp.status_code == 200
 
-    # This observer is only ever passed to `Text2SQLPipeline` -- startup's
-    # schema-retrieval index build (`prepare_retriever`/
-    # `SchemaRetriever.build_index()`) never touches it, so `observer.events`
+    # This observer sees only request-driven events: it is passed to
+    # `Text2SQLPipeline` *and* (as `llm_observer`) to the `SchemaRetriever`
+    # for its per-question embedding, but startup's schema-retrieval index
+    # build reports to the separate schema observer instead
+    # (`app.services.bootstrap._resolve_observers`), so `observer.events`
     # holds exactly this one request's `run()` call, from the start.
     events = observer.events
 
@@ -377,8 +379,13 @@ async def test_observer_sees_cache_and_execution_hooks_on_happy_path(settings: S
     stage_names = [payload["stage"] for kind, payload in events if kind == "stage"]
     assert stage_names == ["retrieve", "render", "generate", "parse", "guard", "execute"]
 
+    # The question embedding inside the `retrieve` stage is reported like any
+    # other LLM call, ahead of the completion that follows it.
     llm_events = [payload for kind, payload in events if kind == "llm"]
-    assert llm_events == [{"stage": "generate", "model": "fake"}]
+    assert llm_events == [
+        {"stage": "embed", "model": "fake-embed"},
+        {"stage": "generate", "model": "fake"},
+    ]
 
     execution_events = [payload for kind, payload in events if kind == "execution"]
     assert execution_events == [{"outcome": "success"}]

@@ -2,8 +2,10 @@ import numpy as np
 import pytest
 
 from app.core.errors import LLMError
+from app.core.observer import NullObserver
 from app.core.schema.models import Column, ForeignKey, SchemaGraph, Table
 from app.core.schema.retrieve import SchemaRetriever
+from app.llm.base import EmbeddingResult, Usage
 from tests.fakes.llm import FakeLLM
 
 
@@ -11,18 +13,13 @@ class VectorLLM(FakeLLM):
     """FakeLLM whose embed() returns hand-picked vectors for known texts.
 
     Falls back to FakeLLM's sha256-based embedding for anything not listed,
-    so it stays a drop-in LLMClient double. Also records every embed() call
-    so tests can assert on batching behaviour.
+    so it stays a drop-in LLMClient double. `FakeLLM.embed()` already records
+    every call in `embed_calls`, so tests can assert on batching behaviour.
     """
 
     def __init__(self, vectors: dict[str, list[float]], dim: int = 4) -> None:
         super().__init__(dim=dim)
         self._vectors = vectors
-        self.embed_calls: list[list[str]] = []
-
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        self.embed_calls.append(list(texts))
-        return await super().embed(texts)
 
     def _embed_one(self, text: str) -> list[float]:
         if text in self._vectors:
@@ -41,12 +38,23 @@ class FlakyLLM(VectorLLM):
         super().__init__(vectors, dim=dim)
         self._remaining_failures = fail_times
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        self.embed_calls.append(list(texts))
+    async def embed(self, texts: list[str]) -> EmbeddingResult:
         if self._remaining_failures > 0:
             self._remaining_failures -= 1
+            self.embed_calls.append(list(texts))
             raise LLMError("ollama embed request failed: connection refused")
-        return [self._embed_one(text) for text in texts]
+        return await super().embed(texts)
+
+
+class RecordingObserver(NullObserver):
+    """`PipelineObserver` that records every `on_llm` event, so a test can
+    assert the retriever reported its embedding calls."""
+
+    def __init__(self) -> None:
+        self.llm_calls: list[tuple[str, str, Usage]] = []
+
+    def on_llm(self, *, stage: str, model: str, usage: Usage) -> None:
+        self.llm_calls.append((stage, model, usage))
 
 
 def _customers() -> Table:
@@ -215,6 +223,53 @@ async def test_build_index_embeds_all_summaries_in_a_single_call() -> None:
 
     assert len(llm.embed_calls) == 1
     assert set(llm.embed_calls[0]) == {t.summary() for t in graph.tables.values()}
+
+
+async def test_retriever_reports_embed_calls_to_the_observer() -> None:
+    graph = _graph()
+    vectors = _base_vectors()
+    vectors["how many customers?"] = CUSTOMERS_VEC
+    observer = RecordingObserver()
+    retriever = SchemaRetriever(graph, VectorLLM(vectors), top_k=4, observer=observer)
+
+    await retriever.build_index()
+    await retriever.retrieve("how many customers?")
+
+    stages = [stage for stage, _, _ in observer.llm_calls]
+    assert stages == ["embed", "embed"]  # one for the index, one for the question
+    assert all(model == "fake-embed" for _, model, _ in observer.llm_calls)
+    assert observer.llm_calls[0][2].prompt_tokens == len(graph.tables)
+    assert observer.llm_calls[1][2].prompt_tokens == 1
+
+
+async def test_build_index_reports_to_the_observer_argument_when_given() -> None:
+    """`prepare_retriever()` hands `build_index()` the startup/refresh-only
+    schema observer, keeping that one embed off the per-request pipeline
+    observer -- see `app.services.bootstrap._resolve_observers`."""
+    graph = _graph()
+    vectors = _base_vectors()
+    vectors["how many customers?"] = CUSTOMERS_VEC
+    request_observer = RecordingObserver()
+    build_observer = RecordingObserver()
+    retriever = SchemaRetriever(graph, VectorLLM(vectors), top_k=4, observer=request_observer)
+
+    await retriever.build_index(observer=build_observer)
+    await retriever.retrieve("how many customers?")
+
+    assert [stage for stage, _, _ in build_observer.llm_calls] == ["embed"]
+    assert [stage for stage, _, _ in request_observer.llm_calls] == ["embed"]
+    assert build_observer.llm_calls[0][2].prompt_tokens == len(graph.tables)
+    assert request_observer.llm_calls[0][2].prompt_tokens == 1
+
+
+async def test_failed_build_index_reports_no_embed_event() -> None:
+    graph = _graph()
+    observer = RecordingObserver()
+    retriever = SchemaRetriever(graph, FlakyLLM(_base_vectors(), fail_times=99), observer=observer)
+
+    await retriever.build_index()
+
+    assert observer.llm_calls == []
 
 
 async def test_scores_covers_all_tables() -> None:

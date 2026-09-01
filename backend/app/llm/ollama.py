@@ -3,7 +3,7 @@ import time
 import httpx
 
 from app.core.errors import LLMError
-from app.llm.base import Completion, Usage
+from app.llm.base import Completion, EmbeddingResult, Usage
 
 
 class OllamaClient:
@@ -56,7 +56,8 @@ class OllamaClient:
             raise LLMError(f"ollama chat returned an unexpected response shape: {exc}") from exc
         return Completion(text=text, usage=usage, model=self.model)
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(self, texts: list[str]) -> EmbeddingResult:
+        start = time.perf_counter()
         try:
             resp = await self._client.post(
                 f"{self.base_url}/api/embed",
@@ -64,14 +65,19 @@ class OllamaClient:
             )
         except httpx.HTTPError as exc:
             raise LLMError(f"ollama embed request failed: {exc}") from exc
+        latency_ms = (time.perf_counter() - start) * 1000
         if resp.is_error:
             raise LLMError(f"ollama embed failed: {resp.status_code} {resp.text[:300]}")
         try:
             data = resp.json()
             embeddings: list[list[float]] = data["embeddings"]
+            # `/api/embed` reports the tokens it embedded as
+            # `prompt_eval_count`; older/other servers omit it -> 0.
+            prompt_tokens = int(data.get("prompt_eval_count", 0))
         except (AttributeError, KeyError, IndexError, TypeError, ValueError) as exc:
             raise LLMError(f"ollama embed returned an unexpected response shape: {exc}") from exc
-        return embeddings
+        usage = Usage(prompt_tokens=prompt_tokens, completion_tokens=0, latency_ms=latency_ms)
+        return EmbeddingResult(vectors=embeddings, usage=usage, model=self.embed_model)
 
     async def aclose(self) -> None:
         await self._client.aclose()

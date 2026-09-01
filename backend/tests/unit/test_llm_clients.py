@@ -5,6 +5,7 @@ import pytest
 
 from app.config import Settings
 from app.core.errors import LLMError
+from app.llm.base import Usage
 from app.llm.factory import build_llm
 from app.llm.ollama import OllamaClient
 from app.llm.openai_compat import OpenAICompatClient
@@ -45,12 +46,14 @@ async def test_ollama_complete_parses_response_and_reports_usage():
     assert completion.model == "qwen2.5-coder:7b"
 
 
-async def test_ollama_embed_posts_batch_input():
+async def test_ollama_embed_posts_batch_input_and_reports_usage():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/embed"
         body = json.loads(request.content)
         assert body["input"] == ["a", "b"]
-        return httpx.Response(200, json={"embeddings": [[0.1, 0.2], [0.3, 0.4]]})
+        return httpx.Response(
+            200, json={"embeddings": [[0.1, 0.2], [0.3, 0.4]], "prompt_eval_count": 7}
+        )
 
     client = OllamaClient(
         base_url="http://localhost:11434/",
@@ -60,8 +63,30 @@ async def test_ollama_embed_posts_batch_input():
         timeout=5.0,
         transport=httpx.MockTransport(handler),
     )
-    vectors = await client.embed(["a", "b"])
-    assert vectors == [[0.1, 0.2], [0.3, 0.4]]
+    result = await client.embed(["a", "b"])
+    assert result.vectors == [[0.1, 0.2], [0.3, 0.4]]
+    assert result.model == "nomic-embed-text"
+    assert result.usage.prompt_tokens == 7
+    assert result.usage.completion_tokens == 0
+    assert result.usage.latency_ms >= 0.0
+
+
+async def test_ollama_embed_reports_zero_prompt_tokens_when_body_omits_the_count():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"embeddings": [[0.1, 0.2]]})
+
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="m",
+        embed_model="nomic-embed-text",
+        api_key="unused",
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    result = await client.embed(["a"])
+    assert result.vectors == [[0.1, 0.2]]
+    assert result.usage.prompt_tokens == 0
+    assert result.usage.completion_tokens == 0
 
 
 async def test_ollama_non_2xx_raises_llm_error():
@@ -193,10 +218,40 @@ async def test_openai_complete_sends_bearer_auth_and_parses_response():
     assert completion.model == "gpt-4o-mini"
 
 
-async def test_openai_embed_posts_to_embeddings_endpoint():
+async def test_openai_embed_posts_to_embeddings_endpoint_and_reports_usage():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/embeddings"
         assert request.headers["authorization"] == "Bearer sk-test"
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"embedding": [0.1, 0.2], "index": 0}],
+                "usage": {"prompt_tokens": 7},
+                "model": "text-embedding-3-small",
+            },
+        )
+
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com",
+        model="m",
+        embed_model="text-embedding-3-small",
+        api_key="sk-test",
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    result = await client.embed(["hello"])
+    assert result.vectors == [[0.1, 0.2]]
+    assert result.model == "text-embedding-3-small"
+    assert result.usage.prompt_tokens == 7
+    assert result.usage.completion_tokens == 0
+    assert result.usage.latency_ms >= 0.0
+
+
+async def test_openai_embed_falls_back_to_configured_model_and_zero_tokens():
+    """A body with neither `usage` nor `model` -- some OpenAI-compatible
+    servers omit both -- must still yield a usable `EmbeddingResult`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2], "index": 0}]})
 
     client = OpenAICompatClient(
@@ -207,8 +262,11 @@ async def test_openai_embed_posts_to_embeddings_endpoint():
         timeout=5.0,
         transport=httpx.MockTransport(handler),
     )
-    vectors = await client.embed(["hello"])
-    assert vectors == [[0.1, 0.2]]
+    result = await client.embed(["hello"])
+    assert result.vectors == [[0.1, 0.2]]
+    assert result.model == "text-embedding-3-small"
+    assert result.usage.prompt_tokens == 0
+    assert result.usage.completion_tokens == 0
 
 
 async def test_openai_embed_returns_vectors_in_request_order_regardless_of_response_order():
@@ -231,8 +289,8 @@ async def test_openai_embed_returns_vectors_in_request_order_regardless_of_respo
         timeout=5.0,
         transport=httpx.MockTransport(handler),
     )
-    vectors = await client.embed(["first", "second"])
-    assert vectors == [[0.1], [0.9]]
+    result = await client.embed(["first", "second"])
+    assert result.vectors == [[0.1], [0.9]]
 
 
 async def test_openai_base_url_does_not_double_v1_suffix():
@@ -402,8 +460,8 @@ async def test_fake_llm_usage_tracks_token_estimates():
 
 async def test_fake_llm_embed_is_deterministic_and_normalized():
     fake = FakeLLM(dim=8)
-    v1 = (await fake.embed(["hello world"]))[0]
-    v2 = (await fake.embed(["hello world"]))[0]
+    v1 = (await fake.embed(["hello world"])).vectors[0]
+    v2 = (await fake.embed(["hello world"])).vectors[0]
     assert v1 == v2
     assert len(v1) == 8
     norm = sum(x * x for x in v1) ** 0.5
@@ -412,6 +470,16 @@ async def test_fake_llm_embed_is_deterministic_and_normalized():
 
 async def test_fake_llm_embed_differs_for_different_text():
     fake = FakeLLM(dim=8)
-    v1 = (await fake.embed(["alpha"]))[0]
-    v2 = (await fake.embed(["beta"]))[0]
+    v1 = (await fake.embed(["alpha"])).vectors[0]
+    v2 = (await fake.embed(["beta"])).vectors[0]
     assert v1 != v2
+
+
+async def test_fake_llm_embed_reports_usage_and_records_calls():
+    fake = FakeLLM(dim=8)
+
+    result = await fake.embed(["x"])
+
+    assert result.usage == Usage(prompt_tokens=1, completion_tokens=0, latency_ms=0.0)
+    assert result.model == "fake-embed"
+    assert fake.embed_calls == [["x"]]

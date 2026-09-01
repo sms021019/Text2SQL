@@ -22,7 +22,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.config import Settings
 from app.core.errors import LLMError
-from app.llm.base import Completion
+from app.llm.base import Completion, EmbeddingResult
 from app.main import create_app
 from tests.fakes.llm import FakeLLM
 
@@ -49,7 +49,7 @@ class HangingLLM:
     async def complete(self, system: str, user: str, *, temperature: float = 0.0) -> Completion:
         return await self._fake.complete(system, user, temperature=temperature)
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(self, texts: list[str]) -> EmbeddingResult:
         self.embed_calls += 1
         if not self.working:
             await asyncio.sleep(10)

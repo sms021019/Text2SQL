@@ -125,11 +125,17 @@ def _resolve_observers(
     """Return `(pipeline_observer, schema_observer)`.
 
     The schema observer is deliberately *not* the pipeline observer: it only
-    ever sees the one `on_cache(cache="schema", ...)` call `prepare_retriever`
-    makes at startup/refresh, kept off of any caller-injected `observer`
-    (e.g. a test's `RecordingObserver`) so that observer's event stream stays
-    exactly one request's worth of pipeline events, nothing from startup.
-    Metrics still see it, via the `MetricsObserver` directly.
+    ever sees what `prepare_retriever` reports at startup/refresh -- the one
+    `on_cache(cache="schema", ...)` call and, on a cache miss, the index
+    build's `on_llm(stage="embed", ...)` -- kept off of any caller-injected
+    `observer` (e.g. a test's `RecordingObserver`) so that observer's event
+    stream stays exactly one request's worth of pipeline events, nothing
+    from startup. Metrics still see both, via the `MetricsObserver` directly.
+
+    The pipeline observer is handed to `prepare_retriever` separately, as
+    `llm_observer`: the retriever keeps it for the *request-time* question
+    embedding, which belongs with `generate`/`repair` on the request's own
+    observer chain.
     """
     if not settings.metrics_enabled:
         return (observer if observer is not None else NullObserver()), NullObserver()
@@ -179,7 +185,12 @@ async def build_components(
 
     graph = await introspect(target_engine)
     retriever, schema_index_source = await prepare_retriever(
-        graph, resolved_llm, settings, schema_cache, observer=schema_observer
+        graph,
+        resolved_llm,
+        settings,
+        schema_cache,
+        observer=schema_observer,
+        llm_observer=pipeline_observer,
     )
     if settings.metrics_enabled:
         set_schema_version(resolved_metrics, graph.version)
@@ -255,6 +266,7 @@ async def refresh_components(components: AppComponents) -> SchemaGraph:
         settings,
         components.schema_cache,
         observer=components.schema_observer,
+        llm_observer=components.observer,
     )
     if settings.metrics_enabled:
         set_schema_version(components.metrics, graph.version)

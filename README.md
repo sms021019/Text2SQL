@@ -151,6 +151,10 @@ execution outcome, cache read) to a `PipelineObserver` protocol defined in
 curl -s http://localhost:8000/metrics | grep t2s_
 ```
 
+LLM calls are labelled by stage — `generate`, `repair`, and `embed` (the
+schema retriever's question and index embeddings) — with tokens and
+estimated cost per model.
+
 `prometheus` scrapes that every 5 s; `grafana` provisions its datasource
 and the *Text2SQL overview* dashboard from
 [`deploy/grafana/`](deploy/grafana/) — LLM p50/p95 by stage, SQL success

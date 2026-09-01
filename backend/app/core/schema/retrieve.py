@@ -1,8 +1,10 @@
 """Embedding-based schema retrieval with FK-hop expansion and keyword boost.
 
 `app/core/**` must never import fastapi/redis/app.api (see
-`app/core/errors.py`), so this module only depends on numpy and the plain
-`LLMClient` protocol.
+`app/core/errors.py`), so this module only depends on numpy, the plain
+`LLMClient` protocol, and `app.core.observer` (which every embedding call is
+reported to as `stage="embed"`, exactly as `app/core/pipeline.py` reports
+its completions).
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from app.core.errors import LLMError
+from app.core.observer import NullObserver, PipelineObserver
 from app.core.schema.models import SchemaGraph
 from app.llm.base import LLMClient
 
@@ -39,6 +42,7 @@ class SchemaRetriever:
         *,
         top_k: int = 4,
         hops: int = 1,
+        observer: PipelineObserver | None = None,
     ) -> None:
         if top_k <= 0:
             raise ValueError("top_k must be positive")
@@ -46,12 +50,17 @@ class SchemaRetriever:
         self._llm = llm
         self._top_k = top_k
         self._hops = hops
+        #: Gets an `on_llm(stage="embed", ...)` call for every embedding this
+        #: retriever makes -- the per-question one in `_score_tables()` and,
+        #: unless `build_index()` is handed an observer of its own, the
+        #: index build too.
+        self._observer: PipelineObserver = observer if observer is not None else NullObserver()
         self._table_names: list[str] | None = None
         self._embeddings: NDArray[np.float64] | None = None
         self._build_error: LLMError | None = None
         self._build_attempted = False
 
-    async def build_index(self) -> None:
+    async def build_index(self, *, observer: PipelineObserver | None = None) -> None:
         """Embed every table's summary and cache the resulting matrix.
 
         Tolerates the LLM being unreachable at startup (e.g. Ollama not yet
@@ -61,18 +70,30 @@ class SchemaRetriever:
         then fails at the `retrieve` stage with the same `llm: ...` error a
         mid-query LLM outage would produce, instead of the app never
         starting at all.
+
+        `observer` overrides the constructor's for this call's one
+        `on_llm(stage="embed", ...)` event: this build runs at
+        startup/refresh, not per request, so `app.services.schema_service`
+        reports it to the metrics-only schema observer rather than to the
+        pipeline observer a caller may have injected -- see
+        `app.services.bootstrap._resolve_observers`. The lazy rebuild
+        `_score_tables()` makes passes no `observer`, and so reports to the
+        constructor's: that retry happens inside a request. A failed build
+        reports nothing at all (there is no `Usage` to report).
         """
+        resolved_observer = observer if observer is not None else self._observer
         self._build_attempted = True
         names = sorted(self._graph.tables)
         summaries = [self._graph.tables[name].summary() for name in names]
         try:
-            vectors = await self._llm.embed(summaries)
+            embedded = await self._llm.embed(summaries)
         except LLMError as exc:
             logger.warning("schema index build failed, will retry lazily: %s", exc)
             self._build_error = exc
             return
+        resolved_observer.on_llm(stage="embed", model=embedded.model, usage=embedded.usage)
         self._table_names = names
-        self._embeddings = np.array(vectors, dtype=np.float64)
+        self._embeddings = np.array(embedded.vectors, dtype=np.float64)
         self._build_error = None
 
     def export_index(self) -> tuple[list[str], NDArray[np.float64]] | None:
@@ -154,7 +175,9 @@ class SchemaRetriever:
             if self._table_names is None or self._embeddings is None:
                 assert self._build_error is not None
                 raise self._build_error
-        [question_vec] = await self._llm.embed([question])
+        embedded = await self._llm.embed([question])
+        self._observer.on_llm(stage="embed", model=embedded.model, usage=embedded.usage)
+        [question_vec] = embedded.vectors
         q = np.array(question_vec, dtype=np.float64)
 
         table_norms = np.linalg.norm(self._embeddings, axis=1)
