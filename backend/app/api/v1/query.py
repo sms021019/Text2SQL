@@ -49,14 +49,13 @@ async def run_query(
     request_id: str = request.state.request_id
     state = request.app.state
 
-    async with session_factory() as session:
-        await persist_query_log(
-            session,
-            out,
-            question=body.question,
-            model=out.model or state.settings.llm_model,
-            schema_version=state.graph.version,
-            request_id=request_id,
-        )
+    await persist_query_log(
+        session_factory,
+        out,
+        question=body.question,
+        model=out.model or state.settings.llm_model,
+        schema_version=state.graph.version,
+        request_id=request_id,
+    )
 
     return to_query_response(out, request_id=request_id)

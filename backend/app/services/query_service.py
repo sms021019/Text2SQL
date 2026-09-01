@@ -5,10 +5,12 @@ plus the `PipelineOutput` -> response/DB-row plumbing shared by the sync
 one place rather than two copies of the same field-by-field mapping drifting
 apart.
 
-`to_query_response()` is pure (no I/O); `persist_query_log()` writes the
-`QueryLog` row via `app.db.query_log.record_query`, swallowing (and logging)
-any failure so a logging problem never fails the request/job itself -- the
-same tolerance `POST /api/v1/query` already had before this module existed.
+`to_query_response()` is pure (no I/O); `persist_query_log()` opens its own
+session from the factory it is handed and writes the `QueryLog` row via
+`app.db.query_log.record_query`, swallowing (and logging) any failure --
+session open and close included -- so a logging problem never fails the
+request/job itself, the same tolerance `POST /api/v1/query` already had
+before this module existed.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import logging
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.pipeline import CacheStatus, PipelineOutput
 from app.db.query_log import record_query
@@ -94,7 +96,7 @@ def to_query_response(out: PipelineOutput, *, request_id: str) -> QueryResponse:
 
 
 async def persist_query_log(
-    session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
     out: PipelineOutput,
     *,
     question: str,
@@ -104,15 +106,24 @@ async def persist_query_log(
 ) -> None:
     """Persist `out` as a `QueryLog` row, tolerating (and logging) any
     failure -- a logging problem must never fail the request/job that
-    produced `out`."""
+    produced `out`.
+
+    Takes the *session factory*, not a session, so that opening and closing
+    the session happen inside this `try` too. A failed `commit()` leaves the
+    session rollback-required, and the `async with`'s own `__aexit__` can
+    then raise a second exception on close; if the caller owned the `async
+    with`, that second one would escape past this handler and turn an
+    app-database outage into a 500 (or a `status="failed"` job).
+    """
     try:
-        await record_query(
-            session,
-            out,
-            question=question,
-            model=model,
-            schema_version=schema_version,
-            request_id=request_id,
-        )
+        async with session_factory() as session:
+            await record_query(
+                session,
+                out,
+                question=question,
+                model=model,
+                schema_version=schema_version,
+                request_id=request_id,
+            )
     except Exception:  # noqa: BLE001 -- a logging failure must not fail the caller
         logger.exception("failed to record query_log", extra={"request_id": request_id})

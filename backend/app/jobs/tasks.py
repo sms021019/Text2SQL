@@ -18,6 +18,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import structlog
+
 from app.services.bootstrap import AppComponents, refresh_components
 from app.services.query_service import persist_query_log, to_query_response
 
@@ -46,21 +48,28 @@ async def run_query_job(
     as a plain dict (arq pickles job results, so a pydantic model would tie
     every reader to this exact class), logging a `query_log` row on the way
     -- the same two steps `POST /api/v1/query` performs inline."""
+    # The worker-side twin of `RequestIDMiddleware`: bind the enqueueing
+    # request's id (plus arq's own job id) into structlog's contextvars, so
+    # every per-stage log line this job emits correlates with the request
+    # that queued it. contextvars are task-local and arq runs each job in
+    # its own task, so `max_jobs > 1` cannot cross-contaminate.
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(request_id=request_id, job_id=ctx["job_id"])
+
     components = _components(ctx)
 
     out = await components.pipeline.run(
         question, use_cache=use_cache, use_result_cache=use_result_cache
     )
 
-    async with components.session_factory() as session:
-        await persist_query_log(
-            session,
-            out,
-            question=question,
-            model=out.model or components.settings.llm_model,
-            schema_version=components.graph.version,
-            request_id=request_id,
-        )
+    await persist_query_log(
+        components.session_factory,
+        out,
+        question=question,
+        model=out.model or components.settings.llm_model,
+        schema_version=components.graph.version,
+        request_id=request_id,
+    )
 
     logger.info(
         "query_job_done",

@@ -133,7 +133,17 @@ def build_pipeline(
 ) -> tuple[Text2SQLPipeline, QueryCache]:
     """Build the `QueryCache` for `graph.version` and the `Text2SQLPipeline`
     wired to use it, together -- see the module docstring for why these two
-    must always be constructed as a pair."""
+    must always be constructed as a pair.
+
+    With `settings.cache_enabled` false the pipeline is handed `cache=None`
+    rather than a cache whose every read is a no-op: that is the only way
+    `PipelineOutput.cache_status` reports `"disabled"` (a disabled
+    `RedisCache` just returns `None`, which the pipeline cannot tell from a
+    genuine miss, so every request would be counted as a miss in
+    `t2s_cache_requests_total`). The `QueryCache` is still built and
+    returned -- it is what `app.state.query_cache` mirrors, and it costs
+    nothing beyond the key derivation it would do anyway.
+    """
     query_cache = QueryCache(
         redis,
         schema_version=graph.version,
@@ -151,6 +161,6 @@ def build_pipeline(
         target_engine=target_engine,
         settings=settings,
         observer=observer,
-        cache=query_cache,
+        cache=query_cache if settings.cache_enabled else None,
     )
     return pipeline, query_cache
