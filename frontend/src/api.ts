@@ -20,6 +20,9 @@ export interface Usage {
   latency_ms: number;
 }
 
+/** Mirrors `app.core.pipeline.CacheStatus`. */
+export type CacheStatus = "miss" | "sql_hit" | "result_hit" | "bypass" | "disabled";
+
 export interface QueryResponse {
   sql: string;
   explanation: string;
@@ -33,6 +36,22 @@ export interface QueryResponse {
   usage: Usage;
   error: string | null;
   request_id: string;
+  cache_status: CacheStatus;
+}
+
+/** Mirrors `app.api.v1.jobs.JobState`. */
+export type JobState = "queued" | "in_progress" | "complete" | "failed" | "not_found";
+
+export interface EnqueueResponse {
+  job_id: string;
+  status: "queued";
+}
+
+export interface JobStatusResponse {
+  job_id: string;
+  status: JobState;
+  result: QueryResponse | null;
+  error: string | null;
 }
 
 export interface SchemaColumn {
@@ -90,14 +109,37 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function askQuestion(
   question: string,
+  useCache = true,
   signal?: AbortSignal,
 ): Promise<QueryResponse> {
   return request<QueryResponse>("/v1/query", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, use_cache: useCache }),
     signal,
   });
+}
+
+/** Enqueues the question onto the background job queue. Throws `ApiError`
+ * (503) when the job queue is unavailable, same as any other API error. */
+export function askQuestionAsync(
+  question: string,
+  useCache = true,
+  signal?: AbortSignal,
+): Promise<EnqueueResponse> {
+  return request<EnqueueResponse>("/v1/query/async", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, use_cache: useCache }),
+    signal,
+  });
+}
+
+export function getJob(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<JobStatusResponse> {
+  return request<JobStatusResponse>(`/v1/jobs/${jobId}`, { signal });
 }
 
 export function getSchema(signal?: AbortSignal): Promise<SchemaResponse> {

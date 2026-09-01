@@ -1,0 +1,20 @@
+# Grafana datasource provisioning: the compose stack's Prometheus.
+#
+# The fixed `uid` matters -- `deploy/grafana/dashboards/text2sql.json`
+# references this datasource by uid, so it must not be Grafana's random
+# per-install one.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Match `deploy/prometheus/prometheus.yml`'s scrape_interval so
+      # Grafana's suggested step never asks for finer resolution than the
+      # data has.
+      timeInterval: 5s

@@ -1,4 +1,4 @@
-import type { KeyboardEvent } from "react";
+import { useState, type KeyboardEvent } from "react";
 
 const EXAMPLE_QUESTIONS = [
   "How many orders were placed last month?",
@@ -6,11 +6,16 @@ const EXAMPLE_QUESTIONS = [
   "What is the average order value by region?",
 ];
 
+export interface SubmitOptions {
+  useCache: boolean;
+  background: boolean;
+}
+
 interface QuestionFormProps {
   question: string;
   loading: boolean;
   onQuestionChange: (question: string) => void;
-  onSubmit: () => void;
+  onSubmit: (options: SubmitOptions) => void;
 }
 
 export function QuestionForm({
@@ -19,10 +24,17 @@ export function QuestionForm({
   onQuestionChange,
   onSubmit,
 }: QuestionFormProps) {
+  const [useCache, setUseCache] = useState(true);
+  const [background, setBackground] = useState(false);
+
+  function submit() {
+    if (!loading && question.trim()) onSubmit({ useCache, background });
+  }
+
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
       e.preventDefault();
-      if (!loading && question.trim()) onSubmit();
+      submit();
     }
   }
 
@@ -31,7 +43,7 @@ export function QuestionForm({
       className="question-form"
       onSubmit={(e) => {
         e.preventDefault();
-        if (!loading && question.trim()) onSubmit();
+        submit();
       }}
     >
       <textarea
@@ -56,6 +68,26 @@ export function QuestionForm({
               {example}
             </button>
           ))}
+        </div>
+        <div className="question-form-options">
+          <label className="option-checkbox">
+            <input
+              type="checkbox"
+              checked={useCache}
+              disabled={loading}
+              onChange={(e) => setUseCache(e.target.checked)}
+            />
+            Use cache
+          </label>
+          <label className="option-checkbox">
+            <input
+              type="checkbox"
+              checked={background}
+              disabled={loading}
+              onChange={(e) => setBackground(e.target.checked)}
+            />
+            Run in background
+          </label>
         </div>
         <button
           type="submit"

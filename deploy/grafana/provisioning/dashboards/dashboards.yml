@@ -1,0 +1,18 @@
+# Grafana dashboard provisioning: load every dashboard JSON file that the
+# compose stack mounts at /var/lib/grafana/dashboards (see the `grafana`
+# service in docker-compose.yml).
+apiVersion: 1
+
+providers:
+  - name: text2sql
+    orgId: 1
+    type: file
+    # The dashboards are mounted read-only, so a UI "save" would fail
+    # confusingly; edits are still possible in the browser, they just can't
+    # be written back to the file.
+    allowUiUpdates: false
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

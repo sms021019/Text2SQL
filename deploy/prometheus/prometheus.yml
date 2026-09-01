@@ -1,0 +1,23 @@
+# Prometheus config for the local docker compose stack.
+#
+# One job: the FastAPI backend's /metrics endpoint, exposed in
+# `backend/app/main.py` against the app's own CollectorRegistry (every
+# `t2s_*` collector plus prometheus-fastapi-instrumentator's `http_*` ones).
+#
+# `scrape_interval: 5s` is deliberately short for a demo: `make load-test`
+# runs for 60 s, which at this interval is ~12 samples per series -- enough
+# for the Grafana panels to visibly move rather than showing a single flat
+# point. It is not a production default.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: text2sql-backend
+    # A plain route (Instrumentator.expose), not a mount: /metrics answers
+    # directly, with no trailing-slash redirect to follow.
+    metrics_path: /metrics
+    static_configs:
+      # Container name and container port on the compose network -- not the
+      # 127.0.0.1:8000 host publication.
+      - targets: ["backend:8000"]

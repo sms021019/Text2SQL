@@ -1,4 +1,7 @@
-# Demo script (~2 minutes)
+# Demo script (~3 minutes)
+
+Sections 0–5 are the Phase 1 core (~2 minutes); sections 6–9 are the
+Phase 2 additions — cache, background jobs, metrics, dashboard, load test.
 
 Assumes `cp .env.example .env` has been run once. This script uses
 `make up-ollama` so it's fully self-contained; if you've already configured
@@ -12,8 +15,9 @@ make up-ollama
 ```
 
 This builds and starts `postgres` (seeded with the NorthwindNext
-e-commerce schema on first boot), `backend`, `frontend`, `ollama`, and a
-one-shot `ollama-pull` container that pulls `qwen2.5-coder:7b` and
+e-commerce schema on first boot), `redis`, `backend`, the arq `worker`,
+`frontend`, `prometheus`, `grafana`, `ollama`, and a one-shot
+`ollama-pull` container that pulls `qwen2.5-coder:7b` and
 `nomic-embed-text` (~5 GB the first time — for a live demo, pre-pull this
 ahead of time so it isn't part of the two minutes).
 
@@ -132,6 +136,94 @@ Each pipeline stage for the requests above logs a JSON line, e.g.:
 
 correlated by `request_id`, the same id returned in the API response and
 stored on the corresponding `query_log` row in `app_db` — the data source
-for `scripts/eval.py` and, from Phase 2, the Grafana dashboards.
+for `scripts/eval.py`.
 
-`Ctrl+C` to stop tailing, then `make down` to tear the stack down.
+`Ctrl+C` to stop tailing.
+
+## 6. Ask the same question again — the cache
+
+Back in the browser, submit **exactly the same question** a second time.
+The answer comes back without an LLM round trip and the badge under the
+SQL panel now reads `cache: sql hit` instead of `cache: miss`.
+
+Same thing via curl:
+
+```bash
+curl -s http://localhost:8000/api/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "top 5 products by revenue"}' \
+  | python -c 'import json,sys; d=json.load(sys.stdin); print(d["cache_status"], d["usage"])'
+# sql_hit {'prompt_tokens': 0, 'completion_tokens': 0, 'latency_ms': 0.0}
+```
+
+Narration: the *SQL* is cached for a day, the *rows* are not — the cached
+statement is re-guarded and re-executed every time, so the data is fresh.
+The short-TTL result cache that skips execution too is opt-in per request
+(`"use_result_cache": true`), and `"use_cache": false` bypasses both
+(`cache_status: bypass`). See [ADR 0003](decisions/0003-cache-design.md).
+
+## 7. Run it in the background — the job queue
+
+Tick **Run in background** in the UI and submit; the app enqueues the
+question and polls until the answer arrives. Or:
+
+```bash
+JOB=$(curl -s -X POST http://localhost:8000/api/v1/query/async \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "how many orders are there for each status?"}' \
+  | python -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')
+
+curl -s http://localhost:8000/api/v1/jobs/$JOB | python -m json.tool
+# {"job_id": "...", "status": "queued", "result": null, "error": null}
+# ... poll again a few seconds later ...
+# {"job_id": "...", "status": "complete", "result": { ...the same QueryResponse... }}
+```
+
+The job runs in the separate `worker` container, on the same pipeline and
+the same caches as the synchronous route — same request body in, same
+response shape out ([ADR 0004](decisions/0004-async-jobs.md)).
+
+## 8. The raw metrics
+
+```bash
+curl -s http://localhost:8000/metrics | grep t2s_cache_requests_total
+```
+
+```
+t2s_cache_requests_total{cache="schema",outcome="miss"} 1.0
+t2s_cache_requests_total{cache="sql",outcome="miss"} 1.0
+t2s_cache_requests_total{cache="sql",outcome="hit"} 1.0
+t2s_cache_requests_total{cache="result",outcome="bypass"} 2.0
+```
+
+(`cache="schema"` is a `miss` on a first boot against a fresh Redis volume —
+nothing was cached to load, so the index was embedded and stored; it becomes
+`hit` once you restart the stack without wiping the volume. The grep also
+matches the `t2s_cache_requests_created` lines Prometheus' client emits
+alongside each counter.)
+
+Every `t2s_*` metric comes from the pipeline's observer hook, not from
+framework middleware: `app/core` reports events, the app layer decides they
+become Prometheus counters ([ADR 0005](decisions/0005-observability.md)).
+
+## 9. The dashboard, under load
+
+Open **http://localhost:3000** (anonymous access, no login) →
+**Dashboards → Text2SQL overview**. Then, in another terminal:
+
+```bash
+make load-test
+# Docker Desktop (macOS/Windows):
+# API_URL=http://host.docker.internal:8000 make load-test
+```
+
+5 virtual users for 60 seconds, walking ten real questions from
+`seed/questions.yaml` — offset per VU, so questions repeat during the run
+and the SQL cache starts hitting — with `use_cache` flipped every other
+iteration, so half the traffic bypasses the cache and the hit-rate panel
+reflects only cache-enabled requests. Prometheus scrapes every 5 s, so
+within a few seconds the panels
+move: LLM p50/p95 by stage, SQL success rate, cache hit rate per tier,
+tokens per minute and cost, queue depth, HTTP p95, guard rejections.
+
+Then `make down` to tear the stack down.

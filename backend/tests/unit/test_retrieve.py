@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from app.core.errors import LLMError
@@ -309,3 +310,64 @@ async def test_mark_build_failed_surfaces_as_llm_error_while_still_down() -> Non
 
     with pytest.raises(LLMError):
         await retriever.retrieve("how many orders")
+
+
+def test_export_index_returns_none_before_build() -> None:
+    graph = _graph()
+    llm = VectorLLM({})
+    retriever = SchemaRetriever(graph, llm)
+
+    assert retriever.export_index() is None
+
+
+async def test_export_index_returns_names_and_matrix_after_build() -> None:
+    graph = _graph()
+    llm = VectorLLM(_base_vectors())
+    retriever = SchemaRetriever(graph, llm)
+    await retriever.build_index()
+
+    exported = retriever.export_index()
+
+    assert exported is not None
+    names, matrix = exported
+    assert set(names) == {"orders", "customers", "products"}
+    assert matrix.shape == (3, 4)
+
+
+def test_import_index_raises_on_length_mismatch() -> None:
+    graph = _graph()
+    llm = VectorLLM({})
+    retriever = SchemaRetriever(graph, llm)
+
+    with pytest.raises(ValueError, match="names"):
+        retriever.import_index(["orders", "customers"], np.zeros((3, 4)))
+
+
+def test_import_index_raises_on_unknown_table_name() -> None:
+    graph = _graph()
+    llm = VectorLLM({})
+    retriever = SchemaRetriever(graph, llm)
+
+    with pytest.raises(ValueError, match="unknown"):
+        retriever.import_index(["orders", "not_a_table"], np.zeros((2, 4)))
+
+
+async def test_import_index_marks_built_and_clears_prior_build_error() -> None:
+    graph = _graph()
+    llm = VectorLLM({})
+    retriever = SchemaRetriever(graph, llm, top_k=1, hops=0)
+    retriever.mark_build_failed("boom")
+
+    matrix = np.array([ORDERS_VEC, CUSTOMERS_VEC, PRODUCTS_VEC])
+    retriever.import_index(["orders", "customers", "products"], matrix)
+
+    exported = retriever.export_index()
+    assert exported is not None
+    names, exported_matrix = exported
+    assert names == ["orders", "customers", "products"]
+    assert exported_matrix.shape == (3, 4)
+
+    # build_error was cleared, so retrieve() no longer raises LLMError from
+    # the stale mark_build_failed() state -- it uses the imported index.
+    result = await retriever.retrieve("how many orders")
+    assert result and set(result) <= {"orders", "customers", "products"}

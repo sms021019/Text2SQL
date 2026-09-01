@@ -59,6 +59,33 @@ class QueryResult:
     duration_ms: float
     truncated: bool
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-safe `dict` -- every cell in `rows` already
+        passed through `_coerce()` on the way out of `execute_readonly`, so
+        no further conversion is needed here; this is used by the result
+        cache (`app.cache.query_cache.QueryCache`) to persist a `QueryResult`
+        as JSON."""
+        return {
+            "columns": self.columns,
+            "rows": self.rows,
+            "row_count": self.row_count,
+            "duration_ms": self.duration_ms,
+            "truncated": self.truncated,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> QueryResult:
+        """Inverse of `to_dict()`. Raises `KeyError`/`TypeError` on a
+        malformed `data` -- callers reading from a cache should treat that
+        the same as a miss, matching `RedisCache`'s fail-open philosophy."""
+        return cls(
+            columns=[str(c) for c in data["columns"]],
+            rows=[list(row) for row in data["rows"]],
+            row_count=int(data["row_count"]),
+            duration_ms=float(data["duration_ms"]),
+            truncated=bool(data["truncated"]),
+        )
+
 
 class ExecutionError(DomainError):
     """A read-only query failed against the database.

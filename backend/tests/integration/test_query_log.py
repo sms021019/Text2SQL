@@ -35,6 +35,7 @@ def _fake_output(*, error: str | None = None, repaired: bool = False) -> Pipelin
         timings=[StageTiming(stage="retrieve", ms=1.0), StageTiming(stage="generate", ms=2.5)],
         error=error,
         model="qwen2.5-coder:7b",
+        cache_status="disabled",
     )
 
 

@@ -5,21 +5,14 @@ index, and swap in a fresh `Text2SQLPipeline`).
 
 from __future__ import annotations
 
-import asyncio
-import logging
-
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 from app.api.deps import _require_ready, get_graph
-from app.core.pipeline import Text2SQLPipeline
-from app.core.schema.introspect import introspect
 from app.core.schema.models import SchemaGraph
-from app.core.schema.retrieve import SchemaRetriever
+from app.services.bootstrap import publish_components, refresh_components
 
 __all__ = ["router"]
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -76,35 +69,16 @@ async def get_schema(graph: SchemaGraph = Depends(get_graph)) -> SchemaResponse:
     dependencies=[Depends(_require_ready)],
 )
 async def refresh_schema(request: Request) -> RefreshResponse:
+    """Rebuild this app's schema-dependent runtime in place and re-publish it
+    onto `app.state`. The rebuild itself lives in
+    `app.services.bootstrap.refresh_components`, shared with the worker-side
+    `app.jobs.tasks.refresh_schema_job`; `publish_components` then swaps the
+    `app.state` mirror the request handlers read -- with no `await` in
+    between, so it is atomic with respect to any other request task on the
+    same event loop."""
     state = request.app.state
 
-    graph = await introspect(state.target_engine)
-    retriever = SchemaRetriever(graph, state.llm, top_k=state.settings.retrieve_top_k)
-    try:
-        await asyncio.wait_for(
-            retriever.build_index(), timeout=state.settings.startup_embed_timeout_s
-        )
-    except TimeoutError:
-        logger.warning(
-            "schema index rebuild timed out after %ss, will retry lazily",
-            state.settings.startup_embed_timeout_s,
-        )
-        retriever.mark_build_failed(
-            f"embedding timed out during refresh after {state.settings.startup_embed_timeout_s}s"
-        )
-    pipeline = Text2SQLPipeline(
-        llm=state.llm,
-        retriever=retriever,
-        graph=graph,
-        builder=state.builder,
-        target_engine=state.target_engine,
-        settings=state.settings,
-    )
-
-    # No `await` between here and the assignments above, so this swap is
-    # atomic with respect to any other request task on the same event loop.
-    state.graph = graph
-    state.retriever = retriever
-    state.pipeline = pipeline
+    graph = await refresh_components(state.components)
+    publish_components(state, state.components)
 
     return RefreshResponse(version=graph.version)

@@ -4,6 +4,7 @@ import sys
 
 import pytest
 from testcontainers.postgres import PostgresContainer
+from testcontainers.redis import RedisContainer
 
 SEED = pathlib.Path(__file__).resolve().parents[2] / "seed"
 
@@ -14,6 +15,14 @@ def pg():
         "postgres:16-alpine", username="postgres", password="postgres", dbname="postgres"
     ) as c:
         yield c
+
+
+@pytest.fixture(scope="session")
+def redis_url():
+    with RedisContainer("redis:7-alpine") as c:
+        host = c.get_container_host_ip()
+        port = c.get_exposed_port(6379)
+        yield f"redis://{host}:{port}/0"
 
 
 @pytest.fixture(scope="session")
