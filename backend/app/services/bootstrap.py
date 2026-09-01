@@ -10,7 +10,9 @@ through exactly the same pipeline, cache, and schema version the synchronous
 route does. `publish_components()` mirrors a built `AppComponents` onto
 `app.state` for `app/api/deps.py` to read; `refresh_components()` re-does the
 introspect/retrieve/pipeline half of the build in place, shared by
-`POST /api/v1/schema/refresh` and `app.jobs.tasks.refresh_schema_job`.
+`POST /api/v1/schema/refresh` and `app.jobs.tasks.refresh_schema_job`
+(whichever of those ran it then announces it to the other processes via
+`app.services.schema_sync`).
 
 Ownership
 ---------
@@ -99,6 +101,12 @@ class AppComponents:
     #: event -- see `_resolve_observers`.
     schema_observer: PipelineObserver
     schema_index_source: SchemaIndexSource
+    #: The shared `schema:epoch` token this process has already accounted
+    #: for -- `None` when Redis never had one (or is down/disabled). Set at
+    #: build time so a process starting *after* someone else's refresh does
+    #: not immediately refresh again for it; advanced by
+    #: `app.services.schema_sync` on both sides of the propagation.
+    schema_epoch: str | None
     owns_llm: bool
     owns_redis: bool
 
@@ -208,6 +216,11 @@ async def build_components(
         observer=pipeline_observer,
     )
 
+    # Baseline, not a bump: adopting whatever epoch is already in Redis
+    # means this process starts in agreement with everyone else and only
+    # refreshes for a bump that happens from now on.
+    schema_epoch = await schema_cache.get_epoch()
+
     return AppComponents(
         settings=settings,
         target_engine=target_engine,
@@ -225,6 +238,7 @@ async def build_components(
         observer=pipeline_observer,
         schema_observer=schema_observer,
         schema_index_source=schema_index_source,
+        schema_epoch=schema_epoch,
         owns_llm=llm is None,
         owns_redis=redis is None,
     )

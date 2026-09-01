@@ -325,12 +325,6 @@ detail and the design-decision writeups (§4) that the ADRs in
 * **Phase 4 (`v1.0`)** — Kubernetes (k3d locally, Terraform-provisioned EKS
   in the cloud).
 
-Known gaps carried out of Phase 2, both deliberate:
-
-* A schema refresh applies to one process only — `POST /schema/refresh` for
-  the API, `refresh_schema_job` for the worker. There is no cross-process
-  invalidation yet.
-
 ## Project layout
 
 ```

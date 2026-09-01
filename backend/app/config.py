@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     #: false, and ignored entirely in the API process, which serves its
     #: registry from `GET /metrics` instead.
     worker_metrics_port: int = 9100
+    #: How often (seconds) each process checks the shared schema epoch in
+    #: Redis and re-introspects if another process refreshed the schema --
+    #: see `app.services.schema_sync`. `0` disables the watcher.
+    schema_sync_poll_s: float = 5.0
 
     log_level: str = "INFO"
     #: Path to the few-shot examples YAML, relative to the CWD the app is

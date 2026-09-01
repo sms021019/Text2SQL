@@ -12,13 +12,18 @@ and a background sampler that reads the queue's depth into the
 `t2s_jobs_queue_depth` gauge. Both degrade quietly when Redis is
 unreachable -- no pool means `POST /query/async` answers 503 while
 `POST /query` keeps working.
+
+It also runs the schema-epoch watcher (`app.services.schema_sync`), which
+both processes need: it re-introspects when *another* process refreshed the
+schema, then re-publishes onto `app.state` so the handlers see the new
+graph.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 
@@ -40,6 +45,7 @@ from app.observability.logging import configure_logging
 from app.observability.metrics import Metrics
 from app.observability.middleware import RequestIDMiddleware
 from app.services.bootstrap import build_components, close_components, publish_components
+from app.services.schema_sync import watch_schema_epoch
 
 __all__ = ["app", "create_app"]
 
@@ -83,12 +89,22 @@ async def _sample_queue_depth(pool: ArqRedis, metrics: Metrics, period_s: float)
         await asyncio.sleep(period_s)
 
 
-def _log_sampler_exit(task: asyncio.Task[None]) -> None:
-    """Warn if the queue-depth sampler died on its own -- the loop above is
-    meant to run until the lifespan cancels it, so any other exit leaves
-    `t2s_jobs_queue_depth` frozen with nothing to say why."""
-    if not task.cancelled() and task.exception() is not None:
-        logger.warning("queue depth sampler stopped", exc_info=task.exception())
+def _log_task_exit(name: str) -> Callable[[asyncio.Task[None]], None]:
+    """A done-callback that warns if one of the lifespan's endless background
+    loops died on its own.
+
+    Both the queue-depth sampler and the schema-epoch watcher are meant to
+    run until the lifespan cancels them, so any other exit is silent
+    breakage -- a frozen `t2s_jobs_queue_depth`, or an app that quietly
+    stops noticing other processes' schema refreshes -- with nothing in the
+    log to say why.
+    """
+
+    def log_exit(task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("%s stopped", name, exc_info=task.exception())
+
+    return log_exit
 
 
 def create_app(
@@ -135,7 +151,20 @@ def create_app(
             sampler = asyncio.create_task(
                 _sample_queue_depth(arq_pool, metrics, resolved_settings.queue_depth_sample_s)
             )
-            sampler.add_done_callback(_log_sampler_exit)
+            sampler.add_done_callback(_log_task_exit("queue depth sampler"))
+
+        # Re-publishing on refresh is what makes the watcher visible to the
+        # handlers: they read the `app.state` mirror, not `components`.
+        watcher: asyncio.Task[None] | None = None
+        if resolved_settings.schema_sync_poll_s > 0:
+            watcher = asyncio.create_task(
+                watch_schema_epoch(
+                    components,
+                    period_s=resolved_settings.schema_sync_poll_s,
+                    on_refreshed=lambda: publish_components(app.state, components),
+                )
+            )
+            watcher.add_done_callback(_log_task_exit("schema epoch watcher"))
 
         app.state.ready = True
 
@@ -143,10 +172,11 @@ def create_app(
             yield
         finally:
             app.state.ready = False
-            if sampler is not None:
-                sampler.cancel()
-                with suppress(asyncio.CancelledError):
-                    await sampler
+            for task in (watcher, sampler):
+                if task is not None:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
             if arq_pool is not None:
                 await arq_pool.aclose()
                 app.state.arq_pool = None

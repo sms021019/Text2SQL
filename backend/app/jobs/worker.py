@@ -9,6 +9,13 @@ lifespan uses, so a job runs through the identical pipeline, caches, and
 schema version the synchronous routes do -- and puts it in `ctx` for
 `app.jobs.tasks` to read; `on_shutdown` closes it.
 
+It also starts the schema-epoch watcher (`app.services.schema_sync`), the
+same loop `app.main`'s lifespan runs, so a `POST /api/v1/schema/refresh`
+served by an API process reaches this worker too -- without it, "identical
+runtimes" would hold only until the first refresh. There is no `app.state`
+mirror here, so no `on_refreshed` callback: `app.jobs.tasks` reads
+`ctx["components"]` directly, which the loop mutates in place.
+
 The worker does *not* migrate the app database: `app.main`'s lifespan owns
 that, so the two processes never race Alembic (compose orders the worker
 after a healthy `backend`, so the migration is done before the first job).
@@ -32,6 +39,8 @@ needed here. See `tests/integration/test_jobs.py`.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from typing import Any
 
 from arq.connections import RedisSettings
@@ -41,6 +50,7 @@ from app.jobs.tasks import refresh_schema_job, run_query_job
 from app.observability.exporter import start_metrics_server
 from app.observability.logging import configure_logging
 from app.services.bootstrap import build_components, close_components
+from app.services.schema_sync import watch_schema_epoch
 
 __all__ = ["WorkerSettings"]
 
@@ -55,9 +65,20 @@ async def startup(ctx: dict[Any, Any]) -> None:
         ctx["metrics_server"] = start_metrics_server(
             components.metrics.registry, port=_settings.worker_metrics_port
         )
+    if _settings.schema_sync_poll_s > 0:
+        ctx["schema_watch"] = asyncio.create_task(
+            watch_schema_epoch(components, period_s=_settings.schema_sync_poll_s)
+        )
 
 
 async def shutdown(ctx: dict[Any, Any]) -> None:
+    # Watcher first: it calls into `components`, so it must be stopped (and
+    # awaited, not merely cancelled) before anything it touches is closed.
+    watch = ctx.pop("schema_watch", None)
+    if watch is not None:
+        watch.cancel()
+        with suppress(asyncio.CancelledError):
+            await watch
     server = ctx.pop("metrics_server", None)
     if server is not None:
         server.close()

@@ -22,6 +22,7 @@ import structlog
 
 from app.services.bootstrap import AppComponents, refresh_components
 from app.services.query_service import persist_query_log, to_query_response
+from app.services.schema_sync import mark_refreshed
 
 __all__ = ["refresh_schema_job", "run_query_job"]
 
@@ -82,7 +83,10 @@ async def refresh_schema_job(ctx: dict[Any, Any]) -> dict[str, str]:
     """Re-introspect the target database and rebuild this worker's retriever
     and pipeline, returning the new schema version -- the worker-side twin of
     `POST /api/v1/schema/refresh`, both going through
-    `app.services.bootstrap.refresh_components`."""
+    `app.services.bootstrap.refresh_components` and both announcing the
+    result via `app.services.schema_sync.mark_refreshed`, so the API
+    processes pick this refresh up on their next poll."""
     components = _components(ctx)
     graph = await refresh_components(components)
+    await mark_refreshed(components)
     return {"version": graph.version}

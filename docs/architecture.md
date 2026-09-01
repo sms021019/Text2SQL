@@ -104,7 +104,10 @@ returns `202 {job_id}`; `GET /api/v1/jobs/{job_id}` polls it. The worker
 runs the identical pipeline, caches and schema version — and writes the
 same `query_log` row, carrying the enqueueing request's `request_id`
 through. A dead queue degrades only the async endpoints (503); the
-synchronous route is unaffected.
+synchronous route is unaffected. A schema refresh run in either process
+reaches the other: the refresher bumps an opaque token in Redis, and every
+process polls that token every `SCHEMA_SYNC_POLL_S` seconds and
+re-introspects when it changes (`app/services/schema_sync.py`, ADR 0004).
 
 **Metrics.** The pipeline reports events to a `PipelineObserver` protocol
 defined in `app/core/observer.py`, which imports nothing framework-shaped.
