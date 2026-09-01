@@ -334,12 +334,17 @@ async def test_redis_unreachable_falls_back_to_miss_and_still_answers(settings: 
     llm = FakeLLM([GOOD_RESPONSE])
     app = create_app(settings=settings, llm=llm, redis=unreachable)
 
-    async with LifespanManager(app):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post(
-                "/api/v1/query", json={"question": "How many orders are there?"}
-            )
+    try:
+        async with LifespanManager(app):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.post(
+                    "/api/v1/query", json={"question": "How many orders are there?"}
+                )
+    finally:
+        # An *injected* cache is the injector's to close -- `create_app` only
+        # closes what it built itself (see `app.services.bootstrap`).
+        await unreachable.aclose()
 
     assert resp.status_code == 200
     body = resp.json()

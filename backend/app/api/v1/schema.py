@@ -9,10 +9,8 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 from app.api.deps import _require_ready, get_graph
-from app.core.schema.introspect import introspect
 from app.core.schema.models import SchemaGraph
-from app.observability.metrics import set_schema_version
-from app.services.schema_service import build_pipeline, prepare_retriever
+from app.services.bootstrap import publish_components, refresh_components
 
 __all__ = ["router"]
 
@@ -71,40 +69,16 @@ async def get_schema(graph: SchemaGraph = Depends(get_graph)) -> SchemaResponse:
     dependencies=[Depends(_require_ready)],
 )
 async def refresh_schema(request: Request) -> RefreshResponse:
+    """Rebuild this app's schema-dependent runtime in place and re-publish it
+    onto `app.state`. The rebuild itself lives in
+    `app.services.bootstrap.refresh_components`, shared with the worker-side
+    `app.jobs.tasks.refresh_schema_job`; `publish_components` then swaps the
+    `app.state` mirror the request handlers read -- with no `await` in
+    between, so it is atomic with respect to any other request task on the
+    same event loop."""
     state = request.app.state
 
-    # Invalidate first: a re-introspected graph with the same version (an
-    # unchanged schema) must still rebuild/re-store, not silently keep
-    # serving whatever was cached under that version.
-    await state.schema_cache.invalidate_all()
-
-    graph = await introspect(state.target_engine)
-    retriever, schema_index_source = await prepare_retriever(
-        graph, state.llm, state.settings, state.schema_cache, observer=state.schema_observer
-    )
-    if state.settings.metrics_enabled:
-        set_schema_version(state.metrics, graph.version)
-    # `build_pipeline` bakes `graph.version` into the new `QueryCache`, so a
-    # refresh that changed the schema (even to a version with the same
-    # tables re-hashed differently) starts every SQL/result-cache lookup
-    # fresh rather than serving entries keyed to the old version.
-    pipeline, query_cache = build_pipeline(
-        llm=state.llm,
-        retriever=retriever,
-        graph=graph,
-        builder=state.builder,
-        target_engine=state.target_engine,
-        settings=state.settings,
-        redis=state.redis,
-        observer=state.observer,
-    )
-
-    # No `await` between here and the assignments above, so this swap is
-    # atomic with respect to any other request task on the same event loop.
-    state.graph = graph
-    state.retriever = retriever
-    state.pipeline = pipeline
-    state.query_cache = query_cache
-    state.schema_index_source = schema_index_source
+    graph = await refresh_components(state.components)
+    publish_components(state, state.components)
 
     return RefreshResponse(version=graph.version)

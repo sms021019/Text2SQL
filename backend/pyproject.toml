@@ -20,6 +20,7 @@ dependencies = [
   "redis>=5",
   "prometheus-client>=0.20",
   "prometheus-fastapi-instrumentator>=7",
+  "arq>=0.26",
 ]
 
 [dependency-groups]

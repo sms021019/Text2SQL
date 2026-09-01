@@ -1,10 +1,17 @@
 """FastAPI application factory and the module-level `app` uvicorn serves.
 
-`create_app()` wires up the whole request-time stack in its lifespan:
-migrate the app DB, open both engines, build (or accept an injected) LLM
-client, introspect the target schema, build the retrieval index, and
-assemble a `Text2SQLPipeline` -- all stored on `app.state` for the route
-handlers in `app/api/v1/**` to read via `app/api/deps.py`.
+`create_app()`'s lifespan migrates the app DB, builds the whole request-time
+runtime via `app.services.bootstrap.build_components()` (shared verbatim with
+the arq worker, so an async job answers exactly as the synchronous route
+does) and publishes it onto `app.state` for the handlers in `app/api/v1/**`
+to read via `app/api/deps.py`.
+
+On top of that runtime the lifespan owns two queue-side concerns the worker
+has no use for: the `ArqRedis` pool `app/api/v1/jobs.py` enqueues through,
+and a background sampler that reads the queue's depth into the
+`t2s_jobs_queue_depth` gauge. Both degrade quietly when Redis is
+unreachable -- no pool means `POST /query/async` answers 503 while
+`POST /query` keeps working.
 """
 
 from __future__ import annotations
@@ -12,57 +19,69 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Any
+from contextlib import asynccontextmanager, suppress
+from dataclasses import replace
 
-import yaml
+from arq import create_pool
+from arq.connections import ArqRedis, RedisSettings
+from arq.constants import default_queue_name
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from redis.exceptions import RedisError
 
 from app.api.router import router
 from app.cache.redis import RedisCache
-from app.cache.schema_cache import SchemaCache
 from app.config import Settings, get_settings
-from app.core.observer import NullObserver, PipelineObserver
-from app.core.prompting.builder import PromptBuilder
-from app.core.schema.introspect import introspect
+from app.core.observer import PipelineObserver
 from app.db.migrate import upgrade_to_head
-from app.db.session import make_engine
 from app.llm.base import LLMClient
-from app.llm.factory import build_llm
 from app.observability.logging import configure_logging
-from app.observability.metrics import (
-    CompositeObserver,
-    Metrics,
-    MetricsObserver,
-    set_schema_version,
-)
+from app.observability.metrics import Metrics
 from app.observability.middleware import RequestIDMiddleware
-from app.services.schema_service import build_pipeline, prepare_retriever
+from app.services.bootstrap import build_components, close_components, publish_components
 
 __all__ = ["app", "create_app"]
 
 logger = logging.getLogger(__name__)
 
 
-def _load_examples(path: str) -> list[dict[str, Any]]:
-    """Load few-shot examples for `PromptBuilder` from `path`.
+async def _create_queue_pool(settings: Settings) -> ArqRedis | None:
+    """Open the `ArqRedis` pool `POST /api/v1/query/async` enqueues through,
+    or `None` if Redis is unreachable -- a queue outage degrades the async
+    endpoints to 503 rather than failing startup.
 
-    Tolerates a missing file (returns no examples, with a warning) -- see
-    `Settings.examples_path`'s docstring for why the file may not be there.
+    `conn_retries=0` overrides arq's default of five one-second retries: a
+    dead Redis must not add six seconds to every start (and the container
+    `HEALTHCHECK`'s `--start-period` budget).
     """
-    p = Path(path)
-    if not p.exists():
-        logger.warning("examples file not found, continuing with no examples: %s", p)
-        return []
-    data = yaml.safe_load(p.read_text(encoding="utf-8"))
-    if not data:
-        return []
-    return list(data)
+    redis_settings = replace(RedisSettings.from_dsn(settings.redis_url), conn_retries=0)
+    try:
+        return await create_pool(redis_settings)
+    except (RedisError, OSError) as exc:
+        logger.warning("job queue unavailable, POST /api/v1/query/async will 503: %s", exc)
+        return None
+
+
+async def _sample_queue_depth(pool: ArqRedis, metrics: Metrics, period_s: float) -> None:
+    """Publish the arq queue's depth into `t2s_jobs_queue_depth` every
+    `period_s` seconds, forever (the lifespan cancels this task on
+    shutdown).
+
+    A Redis blip skips the sample and leaves the gauge on its last reading
+    rather than raising or logging -- this loop runs every few seconds, so
+    logging each failure would flood the log for as long as the outage lasts,
+    and a stale gauge is the signal.
+    """
+    while True:
+        try:
+            depth = await pool.zcard(default_queue_name)
+        except (RedisError, OSError):
+            pass
+        else:
+            metrics.jobs_queue_depth.set(depth)
+        await asyncio.sleep(period_s)
 
 
 def create_app(
@@ -76,32 +95,13 @@ def create_app(
     specific `RedisCache`, and a recording `PipelineObserver` instead of the
     real services `get_settings()`/`build_llm()` (and a `RedisCache` built
     from `settings.redis_url`, and a no-op `NullObserver`) would otherwise
-    resolve."""
+    resolve. An injected `llm`/`redis` stays the caller's to close -- see
+    `app.services.bootstrap`'s Ownership notes."""
     resolved_settings = settings or get_settings()
 
+    # Built here rather than inside the lifespan because `/metrics` is
+    # mounted against this registry below, before the lifespan ever runs.
     metrics = Metrics()
-    if resolved_settings.metrics_enabled:
-        metrics_observer = MetricsObserver(
-            metrics,
-            provider=resolved_settings.llm_provider,
-            prices=resolved_settings.llm_prices_usd_per_1k,
-        )
-        # `schema_observer` is deliberately *not* `resolved_observer` below:
-        # it only ever sees the one `on_cache(cache="schema", ...)` call
-        # `prepare_retriever` makes at startup/refresh, kept off of any
-        # caller-injected `observer` (e.g. a test's `RecordingObserver`) so
-        # that observer's event stream stays exactly what it was before this
-        # task -- one request's worth of pipeline events, nothing from
-        # startup. Metrics still see it, via `metrics_observer` directly.
-        schema_observer: PipelineObserver = metrics_observer
-        resolved_observer: PipelineObserver = (
-            CompositeObserver([observer, metrics_observer])
-            if observer is not None
-            else metrics_observer
-        )
-    else:
-        schema_observer = NullObserver()
-        resolved_observer = observer if observer is not None else NullObserver()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -115,69 +115,38 @@ def create_app(
 
         configure_logging(resolved_settings.log_level)
 
-        target_engine = make_engine(resolved_settings.target_db_url)
-        app_engine = make_engine(resolved_settings.app_db_url)
-        session_factory = async_sessionmaker(app_engine, expire_on_commit=False)
-
-        app_llm = llm or build_llm(resolved_settings)
-
-        redis_cache = redis or RedisCache(
-            resolved_settings.redis_url, enabled=resolved_settings.cache_enabled
+        components = await build_components(
+            resolved_settings, llm=llm, redis=redis, observer=observer, metrics=metrics
         )
-        schema_cache = SchemaCache(redis_cache, ttl_s=resolved_settings.schema_cache_ttl_s)
+        publish_components(app.state, components)
 
-        graph = await introspect(target_engine)
-        retriever, schema_index_source = await prepare_retriever(
-            graph, app_llm, resolved_settings, schema_cache, observer=schema_observer
-        )
-        if resolved_settings.metrics_enabled:
-            set_schema_version(metrics, graph.version)
+        arq_pool = await _create_queue_pool(resolved_settings)
+        app.state.arq_pool = arq_pool
 
-        examples = _load_examples(resolved_settings.examples_path)
-        builder = PromptBuilder(resolved_settings.prompt_version, examples)
+        sampler: asyncio.Task[None] | None = None
+        if arq_pool is not None and resolved_settings.metrics_enabled:
+            sampler = asyncio.create_task(
+                _sample_queue_depth(arq_pool, metrics, resolved_settings.queue_depth_sample_s)
+            )
 
-        pipeline, query_cache = build_pipeline(
-            llm=app_llm,
-            retriever=retriever,
-            graph=graph,
-            builder=builder,
-            target_engine=target_engine,
-            settings=resolved_settings,
-            redis=redis_cache,
-            observer=resolved_observer,
-        )
-
-        app.state.settings = resolved_settings
-        app.state.target_engine = target_engine
-        app.state.app_engine = app_engine
-        app.state.session_factory = session_factory
-        app.state.llm = app_llm
-        app.state.redis = redis_cache
-        app.state.schema_cache = schema_cache
-        app.state.schema_index_source = schema_index_source
-        app.state.graph = graph
-        app.state.retriever = retriever
-        app.state.builder = builder
-        app.state.observer = resolved_observer
-        app.state.metrics = metrics
-        app.state.schema_observer = schema_observer
-        app.state.query_cache = query_cache
-        app.state.pipeline = pipeline
         app.state.ready = True
 
         try:
             yield
         finally:
             app.state.ready = False
-            await target_engine.dispose()
-            await app_engine.dispose()
-            await redis_cache.aclose()
-            aclose = getattr(app_llm, "aclose", None)
-            if aclose is not None:
-                await aclose()
+            if sampler is not None:
+                sampler.cancel()
+                with suppress(asyncio.CancelledError):
+                    await sampler
+            if arq_pool is not None:
+                await arq_pool.aclose()
+                app.state.arq_pool = None
+            await close_components(components)
 
     app = FastAPI(title="Text2SQL API", lifespan=lifespan)
     app.state.ready = False
+    app.state.arq_pool = None
 
     app.add_middleware(
         CORSMiddleware,

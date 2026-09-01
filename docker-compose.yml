@@ -41,6 +41,29 @@ services:
       redis:
         condition: service_healthy
 
+  worker:
+    # Same image as `backend`, with the uvicorn CMD replaced by the arq
+    # worker. No ports: it only talks to postgres and redis.
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["arq", "app.jobs.worker.WorkerSettings"]
+    # The image's HEALTHCHECK curls the API's /healthz, which this container
+    # does not serve -- it would report permanently unhealthy otherwise.
+    healthcheck:
+      disable: true
+    env_file: .env
+    environment:
+      APP_DB_URL: postgresql+asyncpg://app:app@postgres:5432/app
+      TARGET_DB_URL: postgresql+asyncpg://readonly:readonly@postgres:5432/target
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   frontend:
     build: ./frontend
     ports:

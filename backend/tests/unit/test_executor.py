@@ -24,9 +24,7 @@ def test_to_dict_from_dict_roundtrip() -> None:
 
 
 def test_to_dict_is_json_serialisable() -> None:
-    result = QueryResult(
-        columns=["n"], rows=[[42]], row_count=1, duration_ms=1.0, truncated=True
-    )
+    result = QueryResult(columns=["n"], rows=[[42]], row_count=1, duration_ms=1.0, truncated=True)
 
     # Round-trips through actual JSON text, matching how the result cache
     # (`app.cache.query_cache.QueryCache`, via `RedisCache.set_json`) uses it.

@@ -40,7 +40,11 @@ class RedisCache:
         # Client construction is synchronous and lazy -- `from_url` doesn't
         # connect until the first command, so this is safe to call even when
         # `enabled=False` or the URL is unreachable.
-        self._client: aioredis.Redis = aioredis.from_url(
+        # `type: ignore[no-untyped-call]`: `Redis.from_url` carries no
+        # annotations in redis-py 5.x, which is what we resolve to now that
+        # arq (`app/jobs/**`) pins `redis<6`. The annotation on the left
+        # keeps the rest of this module fully typed regardless.
+        self._client: aioredis.Redis = aioredis.from_url(  # type: ignore[no-untyped-call]
             url,
             socket_connect_timeout=0.5,
             socket_timeout=0.5,

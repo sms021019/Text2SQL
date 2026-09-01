@@ -120,6 +120,4 @@ class QueryCache:
                 max_bytes=self._result_max_bytes,
             )
             return
-        await self._redis.set_json(
-            result_cache_key(sql_key=key), payload, ttl_s=self._result_ttl_s
-        )
+        await self._redis.set_json(result_cache_key(sql_key=key), payload, ttl_s=self._result_ttl_s)

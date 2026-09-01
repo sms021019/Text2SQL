@@ -4,59 +4,36 @@ Always returns 200 (even a pipeline error surfaces in the `error` field --
 see `Text2SQLPipeline.run`'s docstring), except for a 422 on an
 empty/too-long `question` (plain pydantic validation) or a 503 if the
 schema has not finished loading (`get_pipeline` dependency).
+
+`QueryRequest`/`QueryResponse` and the `PipelineOutput` -> response mapping
+live in `app.services.query_service`, shared with the async counterpart
+(`POST /api/v1/query/async`, `app/api/v1/jobs.py`) -- re-exported here so
+existing imports of these names from this module keep working.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import get_pipeline, get_session_factory
-from app.core.pipeline import CacheStatus, Text2SQLPipeline
-from app.db.query_log import record_query
+from app.core.pipeline import Text2SQLPipeline
+from app.services.query_service import (
+    QueryRequest,
+    QueryResponse,
+    TimingOut,
+    UsageOut,
+    persist_query_log,
+    to_query_response,
+)
 
-__all__ = ["router"]
+__all__ = ["QueryRequest", "QueryResponse", "TimingOut", "UsageOut", "router"]
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-class QueryRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=2000)
-    use_cache: bool = True
-    use_result_cache: bool = False
-
-
-class TimingOut(BaseModel):
-    stage: str
-    ms: float
-
-
-class UsageOut(BaseModel):
-    prompt_tokens: int
-    completion_tokens: int
-    latency_ms: float
-
-
-class QueryResponse(BaseModel):
-    sql: str
-    explanation: str
-    columns: list[str]
-    rows: list[list[Any]]
-    row_count: int
-    truncated: bool
-    tables: list[str]
-    repaired: bool
-    timings: list[TimingOut]
-    usage: UsageOut
-    error: str | None
-    request_id: str
-    cache_status: CacheStatus
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -70,38 +47,16 @@ async def run_query(
         body.question, use_cache=body.use_cache, use_result_cache=body.use_result_cache
     )
     request_id: str = request.state.request_id
+    state = request.app.state
 
-    try:
-        state = request.app.state
-        async with session_factory() as session:
-            await record_query(
-                session,
-                out,
-                question=body.question,
-                model=out.model or state.settings.llm_model,
-                schema_version=state.graph.version,
-                request_id=request_id,
-            )
-    except Exception:  # noqa: BLE001 -- a logging failure must not fail the request
-        logger.exception("failed to record query_log", extra={"request_id": request_id})
+    async with session_factory() as session:
+        await persist_query_log(
+            session,
+            out,
+            question=body.question,
+            model=out.model or state.settings.llm_model,
+            schema_version=state.graph.version,
+            request_id=request_id,
+        )
 
-    result = out.result
-    return QueryResponse(
-        sql=out.sql,
-        explanation=out.explanation,
-        columns=result.columns if result is not None else [],
-        rows=result.rows if result is not None else [],
-        row_count=result.row_count if result is not None else 0,
-        truncated=result.truncated if result is not None else False,
-        tables=out.tables,
-        repaired=out.repaired,
-        timings=[TimingOut(stage=t.stage, ms=t.ms) for t in out.timings],
-        usage=UsageOut(
-            prompt_tokens=out.usage.prompt_tokens,
-            completion_tokens=out.usage.completion_tokens,
-            latency_ms=out.usage.latency_ms,
-        ),
-        error=out.error,
-        request_id=request_id,
-        cache_status=out.cache_status,
-    )
+    return to_query_response(out, request_id=request_id)

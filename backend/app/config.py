@@ -56,6 +56,14 @@ class Settings(BaseSettings):
         "gpt-4.1-mini": (0.0004, 0.0016),
     }
 
+    #: Max concurrent jobs the arq worker (`app.jobs.worker.WorkerSettings`)
+    #: runs at once -- same knob as `Worker(max_jobs=...)`.
+    arq_max_jobs: int = 4
+    #: How often (seconds) the API lifespan's background sampler reads the
+    #: arq queue depth (`ZCARD arq:queue`) into `t2s_jobs_queue_depth` -- see
+    #: `app.main`'s queue-depth loop.
+    queue_depth_sample_s: float = 5.0
+
     log_level: str = "INFO"
     #: Path to the few-shot examples YAML, relative to the CWD the app is
     #: launched from (`backend/` locally; in the Docker image `seed/` is

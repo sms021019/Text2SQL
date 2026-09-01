@@ -6,11 +6,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import health, query, schema
+from app.api.v1 import health, jobs, query, schema
 
 __all__ = ["router"]
 
 router = APIRouter()
 router.include_router(health.router, tags=["health"])
 router.include_router(query.router, prefix="/api/v1", tags=["query"])
+router.include_router(jobs.router, prefix="/api/v1", tags=["jobs"])
 router.include_router(schema.router, prefix="/api/v1", tags=["schema"])

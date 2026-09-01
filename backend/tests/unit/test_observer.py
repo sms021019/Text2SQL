@@ -11,9 +11,7 @@ def test_null_observer_every_hook_is_a_silent_no_op() -> None:
     observer = NullObserver()
 
     assert observer.on_stage("retrieve", 1.0) is None
-    assert (
-        observer.on_llm(stage="generate", model="fake", usage=Usage(0, 0, 0.0)) is None
-    )
+    assert observer.on_llm(stage="generate", model="fake", usage=Usage(0, 0, 0.0)) is None
     assert observer.on_guard_reject("not_select") is None
     assert observer.on_execution(outcome="success", ms=5.0) is None
     assert observer.on_cache(cache="sql", outcome="miss") is None
