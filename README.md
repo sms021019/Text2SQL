@@ -260,9 +260,12 @@ make load-test
 
 Runs [`scripts/load_test.js`](scripts/load_test.js) in the `grafana/k6`
 container: 5 virtual users for 60 seconds against `POST /api/v1/query`,
-walking ten questions copied from `seed/questions.yaml` and flipping
-`use_cache` on and off every other iteration so the cache panels have both
-hits and bypasses to plot. Watch the Grafana dashboard while it runs.
+walking ten questions copied from `seed/questions.yaml`. The walk is offset
+per VU so the same question comes back around within the run — that is what
+produces SQL-cache hits — and `use_cache` flips every other iteration, so
+half the traffic bypasses the cache entirely and the hit-rate panel measures
+only the requests that actually consulted it. Watch the Grafana dashboard
+while it runs.
 
 The k6 container reaches the API over `--network host`, which resolves
 `127.0.0.1:8000` on Linux but not on Docker Desktop for macOS/Windows —
@@ -274,8 +277,9 @@ API_URL=http://host.docker.internal:8000 make load-test
 
 With no LLM reachable the run still exercises the HTTP, schema-retrieval,
 cache-miss and error paths (every request answers 200 with an `llm:` error
-in the body), so the latency, cache and success-rate panels move; only the
-token, cost and cache-*hit* series stay empty.
+in the body), so the HTTP latency, success-rate and queue-depth panels move
+and the cache hit rate plots a flat 0 % (nothing is cached, because a failed
+run is never cached); only the token and cost series stay empty.
 
 ## Roadmap
 

@@ -209,7 +209,7 @@
       "id": 4,
       "type": "timeseries",
       "title": "Cache hit rate by tier",
-      "description": "Hits over hits+misses per tier of t2s_cache_requests_total (cache=sql|result|schema). outcome=\"bypass\" is excluded from the denominator: a bypassed tier was never read, so counting it would report a hit rate for requests that opted out of the cache.",
+      "description": "Hits over hits+misses per tier of t2s_cache_requests_total (cache=sql|result|schema). outcome=\"bypass\" is excluded from both sides: a bypassed tier was never read, so counting it would report a hit rate for requests that opted out of the cache. The trailing `or (... * 0)` makes a tier that has been read but never hit plot a flat 0 instead of vanishing into \"No data\" -- without it, zero hits and zero traffic look identical.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -255,7 +255,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "sum by (cache) (rate(t2s_cache_requests_total{outcome=\"hit\"}[5m])) / sum by (cache) (rate(t2s_cache_requests_total{outcome=~\"hit|miss\"}[5m]))",
+          "expr": "sum by (cache) (rate(t2s_cache_requests_total{outcome=\"hit\"}[5m])) / sum by (cache) (rate(t2s_cache_requests_total{outcome=~\"hit|miss\"}[5m])) or (sum by (cache) (rate(t2s_cache_requests_total{outcome=~\"hit|miss\"}[5m])) * 0)",
           "legendFormat": "{{cache}}"
         }
       ]
@@ -264,7 +264,7 @@
       "id": 5,
       "type": "timeseries",
       "title": "SQL guard rejections by reason",
-      "description": "t2s_sql_guard_rejections_total as a per-minute rate. Reasons come from GuardError.reason: parse, not_select, write_cte, into, lock, forbidden_function, unknown_table.",
+      "description": "t2s_sql_guard_rejections_total as a per-minute rate. Reasons are the full set of GuardError.reason values in backend/app/core/sql/guard.py: parse, multi_statement, not_select, set_op_non_select, write_cte, into, lock, forbidden_function, unknown_table.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

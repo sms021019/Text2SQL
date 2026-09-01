@@ -43,12 +43,19 @@ export const options = {
 };
 
 export default function () {
-  // Walk the list rather than picking at random, so every question is asked
-  // repeatedly within the run -- a cache hit needs the *same* question
-  // twice.
-  const question = QUESTIONS[__ITER % QUESTIONS.length];
-  // Alternate the cache on and off per iteration so the Grafana cache
-  // hit-rate panel has both hits and bypasses to plot.
+  // Offset the walk by VU so the five VUs are on different questions at any
+  // moment. A cache hit needs the *same* question asked twice with the
+  // cache enabled, and one VU alone would need 11 iterations to come back
+  // around -- more than a 60 s run fits at LLM latency. Offsetting means VU
+  // n's question at iteration i was already asked by VU n-2 at iteration
+  // i-2 (both even, so both cache-enabled), which puts the first SQL-tier
+  // hits inside the first third of the run. Hits still require a reachable
+  // LLM: a failed run is never cached.
+  const question = QUESTIONS[(__VU + __ITER) % QUESTIONS.length];
+  // Alternate the cache on and off per iteration. Half the traffic
+  // bypassing it keeps the hit-rate panel honest -- it then measures only
+  // requests that actually consulted the cache -- and the miss/bypass split
+  // is visible directly in t2s_cache_requests_total.
   const useCache = __ITER % 2 === 0;
 
   const res = http.post(

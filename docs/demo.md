@@ -215,8 +215,11 @@ make load-test
 ```
 
 5 virtual users for 60 seconds, walking ten real questions from
-`seed/questions.yaml` and flipping the cache on and off every other
-iteration. Prometheus scrapes every 5 s, so within a few seconds the panels
+`seed/questions.yaml` — offset per VU, so questions repeat during the run
+and the SQL cache starts hitting — with `use_cache` flipped every other
+iteration, so half the traffic bypasses the cache and the hit-rate panel
+reflects only cache-enabled requests. Prometheus scrapes every 5 s, so
+within a few seconds the panels
 move: LLM p50/p95 by stage, SQL success rate, cache hit rate per tier,
 tokens per minute and cost, queue depth, HTTP p95, guard rejections.
 
