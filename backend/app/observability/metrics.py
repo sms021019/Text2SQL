@@ -6,8 +6,8 @@ implementations that write pipeline events into it.
 time / module scope) so each app -- and each test -- gets its own isolated
 registry instead of every instance colliding on `prometheus_client`'s
 process-global default registry (`app/main.py` stores the instance on
-`app.state.metrics` and mounts it at `/metrics` via
-`prometheus_client.make_asgi_app(registry=...)`).
+`app.state.metrics` and exposes it at `/metrics` via
+`Instrumentator(registry=...).instrument(app).expose(app)`).
 
 `MetricsObserver` is the `PipelineObserver` that actually records events.
 `CompositeObserver` exists so `create_app(observer=...)` can keep an

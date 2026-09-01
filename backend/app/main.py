@@ -27,7 +27,6 @@ from arq.connections import ArqRedis, RedisSettings
 from arq.constants import default_queue_name
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
 from redis.exceptions import RedisError
 
@@ -84,6 +83,14 @@ async def _sample_queue_depth(pool: ArqRedis, metrics: Metrics, period_s: float)
         await asyncio.sleep(period_s)
 
 
+def _log_sampler_exit(task: asyncio.Task[None]) -> None:
+    """Warn if the queue-depth sampler died on its own -- the loop above is
+    meant to run until the lifespan cancels it, so any other exit leaves
+    `t2s_jobs_queue_depth` frozen with nothing to say why."""
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("queue depth sampler stopped", exc_info=task.exception())
+
+
 def create_app(
     settings: Settings | None = None,
     llm: LLMClient | None = None,
@@ -100,7 +107,7 @@ def create_app(
     resolved_settings = settings or get_settings()
 
     # Built here rather than inside the lifespan because `/metrics` is
-    # mounted against this registry below, before the lifespan ever runs.
+    # exposed against this registry below, before the lifespan ever runs.
     metrics = Metrics()
 
     @asynccontextmanager
@@ -128,6 +135,7 @@ def create_app(
             sampler = asyncio.create_task(
                 _sample_queue_depth(arq_pool, metrics, resolved_settings.queue_depth_sample_s)
             )
+            sampler.add_done_callback(_log_sampler_exit)
 
         app.state.ready = True
 
@@ -161,15 +169,17 @@ def create_app(
     app.include_router(router)
 
     if resolved_settings.metrics_enabled:
-        # `.instrument(app)` only (no `.expose()`): we mount the ASGI app
-        # ourselves below, against `metrics.registry` rather than
-        # `prometheus_client`'s process-global default registry, so tests
-        # constructing multiple apps in the same process don't collide.
+        # `registry=metrics.registry` on both halves: instrumentation *and*
+        # the exposition endpoint read this app's own `CollectorRegistry`
+        # rather than `prometheus_client`'s process-global default one, so
+        # tests constructing multiple apps in the same process don't collide.
+        # `.expose()` registers a plain `GET /metrics` route (not a `Mount`),
+        # so a slash-less request is answered directly instead of 307ing to
+        # `/metrics/`.
         Instrumentator(
             registry=metrics.registry,
             excluded_handlers=["/metrics", "/healthz", "/readyz"],
-        ).instrument(app)
-        app.mount("/metrics", make_asgi_app(registry=metrics.registry))
+        ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
     return app
 
